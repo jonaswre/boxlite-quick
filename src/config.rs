@@ -2,7 +2,6 @@
 //! into one validated [`Config`] (jonaswre/boxlite-quick#6, ADR 0001).
 
 use crate::Workspace;
-use crate::egress::entry_opens_host_loopback;
 use anyhow::Context;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -300,6 +299,30 @@ fn is_allow_entry(entry: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         })
+}
+
+/// The guest's address for the host's 127.0.0.1 (`host.boxlite.internal`).
+pub(crate) const HOST_LOOPBACK: Ipv4Addr = Ipv4Addr::new(192, 168, 127, 254);
+
+/// Whether the IP or CIDR rule `entry` would open host loopback. Hostnames never do: BoxLite
+/// refuses a name that resolves to loopback unless an IP rule covers it.
+fn entry_opens_host_loopback(entry: &str) -> bool {
+    let (ip, prefix) = entry.split_once('/').unwrap_or((entry, "32"));
+    match (ip.parse(), prefix.parse()) {
+        (Ok(ip), Ok(prefix)) => opens_host_loopback(ip, prefix),
+        _ => false,
+    }
+}
+
+/// Whether an IP rule for `ip/prefix` would open host loopback: it covers [`HOST_LOOPBACK`], or
+/// overlaps 127.0.0.0/8, which a hostname rule that resolves there would then reach.
+pub(crate) fn opens_host_loopback(ip: Ipv4Addr, prefix: u8) -> bool {
+    let overlaps = |net: Ipv4Addr, bits: u8| {
+        let bits = prefix.min(bits);
+        let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
+        u32::from(ip) & mask == u32::from(net) & mask
+    };
+    overlaps(HOST_LOOPBACK, 32) || overlaps(Ipv4Addr::LOCALHOST, 8)
 }
 
 /// `$XDG_CONFIG_HOME/boxq`, falling back to `~/.config/boxq`.

@@ -1,7 +1,7 @@
 //! The Egress Policy: which outbound destinations a Sandbox may reach (jonaswre/boxlite-quick#13).
 
 use crate::Workspace;
-use crate::config::{BaseUrl, Config, Egress};
+use crate::config::{BaseUrl, Config, Egress, HOST_LOOPBACK, opens_host_loopback};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,9 +27,6 @@ const BUILTINS: &[&str] = &[
     "crates.io",
     "*.crates.io",
 ];
-
-/// The guest's address for the host's 127.0.0.1 (`host.boxlite.internal`).
-const HOST_LOOPBACK: Ipv4Addr = Ipv4Addr::new(192, 168, 127, 254);
 
 /// A Sandbox's `allow_net`. Never empty, since BoxLite reads an empty list as full access.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,25 +261,4 @@ fn is_hostname(entry: &str) -> bool {
 fn in_tailnet(ip: Ipv4Addr) -> bool {
     let [a, b, ..] = ip.octets();
     a == 100 && b & 0xc0 == 64
-}
-
-/// Whether the IP or CIDR rule `entry` would open host loopback. Hostnames never do: BoxLite
-/// refuses a name that resolves to loopback unless an IP rule covers it.
-pub(crate) fn entry_opens_host_loopback(entry: &str) -> bool {
-    let (ip, prefix) = entry.split_once('/').unwrap_or((entry, "32"));
-    match (ip.parse(), prefix.parse()) {
-        (Ok(ip), Ok(prefix)) => opens_host_loopback(ip, prefix),
-        _ => false,
-    }
-}
-
-/// Whether an IP rule for `ip/prefix` would open host loopback: it covers [`HOST_LOOPBACK`], or
-/// overlaps 127.0.0.0/8, which a hostname rule that resolves there would then reach.
-fn opens_host_loopback(ip: Ipv4Addr, prefix: u8) -> bool {
-    let overlaps = |net: Ipv4Addr, bits: u8| {
-        let bits = prefix.min(bits);
-        let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
-        u32::from(ip) & mask == u32::from(net) & mask
-    };
-    overlaps(HOST_LOOPBACK, 32) || overlaps(Ipv4Addr::LOCALHOST, 8)
 }
