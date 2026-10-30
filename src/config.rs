@@ -327,11 +327,27 @@ pub(crate) fn opens_host_loopback(ip: Ipv4Addr, prefix: u8) -> bool {
 
 /// `$XDG_CONFIG_HOME/boxq`, falling back to `~/.config/boxq`.
 fn config_dir(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
-    let base = match env("XDG_CONFIG_HOME").filter(|dir| Path::new(dir).is_absolute()) {
+    xdg_dir(env, "XDG_CONFIG_HOME", ".config", "config")
+}
+
+/// `$XDG_STATE_HOME/boxq`, falling back to `~/.local/state/boxq`.
+pub(crate) fn state_dir(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
+    xdg_dir(env, "XDG_STATE_HOME", ".local/state", "state")
+}
+
+/// `${var}/boxq`, falling back to `~/{fallback}/boxq`; `what` names boxq's use of it.
+fn xdg_dir(
+    env: impl Fn(&str) -> Option<String>,
+    var: &str,
+    fallback: &str,
+    what: &str,
+) -> anyhow::Result<PathBuf> {
+    let base = match env(var).filter(|dir| Path::new(dir).is_absolute()) {
         Some(dir) => PathBuf::from(dir),
         None => {
-            let home = env("HOME").context("cannot find boxq's config: HOME is not set")?;
-            Path::new(&home).join(".config")
+            let home = env("HOME")
+                .with_context(|| format!("cannot find boxq's {what}: HOME is not set"))?;
+            Path::new(&home).join(fallback)
         }
     };
     Ok(base.join("boxq"))
@@ -380,10 +396,18 @@ fn read_credentials(path: &Path) -> anyhow::Result<Credentials> {
     })
 }
 
-/// Parse a config file, or return an empty one if it doesn't exist.
-fn read_file<T: Default + DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+/// Parse a TOML file, or return an empty one if it doesn't exist.
+pub(crate) fn read_file<T: Default + DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+    read_or_default(path, |text| toml::from_str(text))
+}
+
+/// Parse the file at `path` with `parse`, or return `T::default()` if it doesn't exist.
+pub(crate) fn read_or_default<T: Default, E: std::error::Error + Send + Sync + 'static>(
+    path: &Path,
+    parse: impl FnOnce(&str) -> Result<T, E>,
+) -> anyhow::Result<T> {
     match std::fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("invalid {}", path.display())),
+        Ok(text) => parse(&text).with_context(|| format!("invalid {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }

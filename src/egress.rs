@@ -1,7 +1,9 @@
 //! The Egress Policy: which outbound destinations a Sandbox may reach (jonaswre/boxlite-quick#13).
 
 use crate::Workspace;
-use crate::config::{BaseUrl, Config, Egress, HOST_LOOPBACK, opens_host_loopback};
+use crate::config::{
+    BaseUrl, Config, Egress, HOST_LOOPBACK, opens_host_loopback, read_file, state_dir,
+};
 use crate::digest::sha256_hex;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -134,14 +136,7 @@ impl Approvals {
     /// The approvals at `$XDG_STATE_HOME/boxq/approvals.toml`, falling back to
     /// `~/.local/state/boxq/approvals.toml`, reading the environment through `env`.
     pub fn from_env(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
-        let base = match env("XDG_STATE_HOME").filter(|dir| Path::new(dir).is_absolute()) {
-            Some(dir) => PathBuf::from(dir),
-            None => {
-                let home = env("HOME").context("cannot find boxq's state: HOME is not set")?;
-                Path::new(&home).join(".local/state")
-            }
-        };
-        Ok(Self::new(&base.join("boxq/approvals.toml")))
+        Ok(Self::new(&state_dir(env)?.join("approvals.toml")))
     }
 
     /// Whether the Workspace's `entries` apply. Unless they are the ones last approved, `ask` is
@@ -183,13 +178,7 @@ impl Approvals {
     }
 
     fn read(&self) -> anyhow::Result<ApprovalsFile> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("invalid {}", self.path.display()))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ApprovalsFile::default()),
-            Err(e) => Err(e).with_context(|| format!("cannot read {}", self.path.display())),
-        }
+        read_file(&self.path)
     }
 
     fn write(&self, file: &ApprovalsFile) -> anyhow::Result<()> {

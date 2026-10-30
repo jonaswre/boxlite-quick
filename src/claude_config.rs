@@ -6,6 +6,7 @@
 //! on the host stays in the Sandbox until `boxq rm`.
 
 use crate::Workspace;
+use crate::config::read_or_default;
 use crate::sandbox::ExecTarget;
 use anyhow::Context;
 use serde_json::{Map, Value};
@@ -162,11 +163,7 @@ const SYNCED_PROJECT_KEYS: [&str; 3] = [
 
 /// The JSON object in the host file at `path`, or an empty one if there is no file.
 fn read_json(path: &Path) -> anyhow::Result<Map<String, Value>> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).with_context(|| format!("invalid {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
-        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
-    }
+    read_or_default(path, |text| serde_json::from_str(text))
 }
 
 /// The object at `key` in `map`, made one if it is anything else.

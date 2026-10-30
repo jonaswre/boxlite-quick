@@ -3,6 +3,7 @@
 
 use crate::Workspace;
 use crate::auth::Auth;
+use crate::config::read_or_default;
 use crate::egress::Policy;
 use crate::reap::reap_box;
 use crate::runtime;
@@ -271,14 +272,7 @@ impl Sandboxes {
     }
 
     fn read_record(&self, box_name: &str) -> anyhow::Result<Option<Record>> {
-        let path = self.record_path(box_name);
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Ok(Some(
-                toml::from_str(&s).with_context(|| format!("invalid {}", path.display()))?,
-            )),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
-        }
+        read_or_default(&self.record_path(box_name), |s| toml::from_str(s).map(Some))
     }
 }
 
