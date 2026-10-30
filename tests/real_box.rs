@@ -8,9 +8,10 @@
 //! target (jonaswre/boxlite-quick#10), this test should drive that instead of BoxLite directly.
 
 use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
-use boxlite::{BoxCommand, BoxliteRuntime, GuestSession};
+use boxlite::{BoxCommand, BoxliteRuntime, GuestSession, LiteBox};
 use boxlite_shared::BoxTransport;
-use std::path::Path;
+use boxq::reap::reap_box;
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 const BOX_NAME: &str = "boxq-real-box-test";
@@ -19,28 +20,71 @@ const BOX_NAME: &str = "boxq-real-box-test";
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_command_runs_through_box_sock_while_the_runtime_is_held() {
     let home = tempfile::tempdir().unwrap();
-    let rt = BoxliteRuntime::new(BoxliteOptions {
-        home_dir: home.path().into(),
-        ..Default::default()
-    })
-    .unwrap();
+    let rt = runtime(home.path());
+    let b = create(&rt).await;
 
-    let ran = run_while_held(&rt, home.path()).await;
+    let ran = run_while_held(&b, home.path()).await;
 
     // Clean up before asserting, so a failure never leaves a VM running.
-    if let Ok(Some(b)) = rt.get(BOX_NAME).await {
-        let _ = b.stop().await;
-    }
-    let _ = rt.remove(BOX_NAME, true).await;
-    kill_leftovers(home.path());
+    clean_up(&rt, &b, home.path()).await;
 
     let (lock_held, stdout, exit_code) = ran.unwrap();
     assert!(lock_held, "the runtime should hold the BOXLITE_HOME lock");
     assert_eq!((stdout.as_str(), exit_code), ("hello from the box\n", 0));
 }
 
-/// Starts the Box, then, with `rt` still open, runs `echo` in it through `box.sock`.
-async fn run_while_held(rt: &BoxliteRuntime, home: &Path) -> anyhow::Result<(bool, String, i32)> {
+/// BoxLite 0.11 leaks the shim and VM on `stop` wherever it can't create the Box's cgroup,
+/// which includes GitHub's runners (jonaswre/boxlite-quick#19). Remove `reap_box` once a BoxLite
+/// release reaps the tree itself (boxlite-ai/boxlite#1240), and this test still passes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn no_shim_survives_stop_or_rm_once_reaped() {
+    let home = tempfile::tempdir().unwrap();
+    let rt = runtime(home.path());
+    let b = create(&rt).await;
+
+    let survivors = stop_then_rm(&rt, &b, home.path()).await;
+
+    clean_up(&rt, &b, home.path()).await;
+
+    let (after_stop, after_rm) = survivors.unwrap();
+    assert_eq!(after_stop, Vec::<PathBuf>::new(), "shims left after stop");
+    assert_eq!(after_rm, Vec::<PathBuf>::new(), "shims left after rm");
+}
+
+/// Starts and stops the Box, then starts and force-removes it, reaping after each. Returns the
+/// shims still running after each reap.
+async fn stop_then_rm(
+    rt: &BoxliteRuntime,
+    b: &LiteBox,
+    home: &Path,
+) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let id = b.id().to_string();
+    b.start().await?;
+    b.stop().await?;
+    reap_box(home, &id)?;
+    let after_stop = shims(home)?;
+
+    // `stop` invalidates the handle.
+    let b = rt
+        .get(BOX_NAME)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the stopped Box is gone"))?;
+    b.start().await?;
+    rt.remove(BOX_NAME, true).await?;
+    reap_box(home, &id)?;
+    Ok((after_stop, shims(home)?))
+}
+
+fn runtime(home: &Path) -> BoxliteRuntime {
+    BoxliteRuntime::new(BoxliteOptions {
+        home_dir: home.into(),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+async fn create(rt: &BoxliteRuntime) -> LiteBox {
     let options = BoxOptions {
         rootfs: RootfsSpec::Image("alpine:3".into()),
         entrypoint: Some(vec![]),
@@ -49,7 +93,11 @@ async fn run_while_held(rt: &BoxliteRuntime, home: &Path) -> anyhow::Result<(boo
         detach: true,
         ..Default::default()
     };
-    let b = rt.create(options, Some(BOX_NAME.into())).await?;
+    rt.create(options, Some(BOX_NAME.into())).await.unwrap()
+}
+
+/// Starts the Box, then, with the runtime still open, runs `echo` in it through `box.sock`.
+async fn run_while_held(b: &LiteBox, home: &Path) -> anyhow::Result<(bool, String, i32)> {
     b.start().await?;
     let box_dir = home.join("boxes").join(b.id().to_string());
 
@@ -86,15 +134,24 @@ async fn run_while_held(rt: &BoxliteRuntime, home: &Path) -> anyhow::Result<(boo
     Ok((lock_held, stdout, result.exit_code))
 }
 
-/// BoxLite 0.11 leaks the Box's shim and VM on `stop` wherever it can't create a cgroup
-/// (jonaswre/boxlite-quick#19). Kill whatever still runs from this test's home; boxq's own
-/// reaper (jonaswre/boxlite-quick#21) replaces this and asserts that nothing survives.
-fn kill_leftovers(home: &Path) {
-    let _ = std::process::Command::new("pkill")
-        .arg("-KILL")
-        .arg("-f")
-        .arg(home)
-        .status();
+async fn clean_up(rt: &BoxliteRuntime, b: &LiteBox, home: &Path) {
+    let _ = rt.remove(BOX_NAME, true).await;
+    let _ = reap_box(home, b.id().as_ref());
+}
+
+/// The executables of the processes running a shim from under `home`.
+fn shims(home: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let boxes = std::fs::canonicalize(home)?.join("boxes");
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        if let Ok(exe) = std::fs::read_link(entry?.path().join("exe"))
+            && exe.starts_with(&boxes)
+            && exe.to_string_lossy().contains("boxlite-shim")
+        {
+            found.push(exe);
+        }
+    }
+    Ok(found)
 }
 
 /// The container id is `pub(crate)` in BoxLite 0.11; it is the one directory name under
