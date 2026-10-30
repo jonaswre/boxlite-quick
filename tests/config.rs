@@ -295,13 +295,20 @@ fn unknown_keys_are_errors_naming_file_and_key() {
 
 #[test]
 fn errors_in_the_credentials_file_never_echo_its_contents() {
-    for toml in [r#"token = "sk-secret""#, r#"api_key = "sk-secret"#] {
+    for toml in [
+        r#"token = "sk-secret""#,
+        r#"api_key = "sk-secret"#,
+        "api_key = sk-secret",
+        "api_key = 123456789",
+        "api_key = [\"sk-secret\"]",
+    ] {
         let host = Host::new();
         host.write_credentials(toml, 0o600);
 
         let err = format!("{:#}", host.load().unwrap_err());
 
         assert!(!err.contains("sk-secret"), "{err}");
+        assert!(!err.contains("123456789"), "{err}");
     }
 }
 

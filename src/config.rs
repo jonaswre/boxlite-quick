@@ -254,12 +254,17 @@ fn read_credentials(path: &Path) -> anyhow::Result<Credentials> {
     );
     let text =
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
-    // toml's own error quotes the offending line, which would print the key.
+    // toml's errors quote the offending line or value, which could print the key. Only an
+    // unknown-key message is known to hold no value.
     toml::from_str(&text).map_err(|e| {
         let line = e
             .span()
             .map_or(1, |s| text[..s.start].matches('\n').count() + 1);
-        anyhow::anyhow!("invalid {} at line {line}: {}", path.display(), e.message())
+        let message = match e.message() {
+            m if m.starts_with("unknown field") => m,
+            _ => "expected `api_key = \"…\"`",
+        };
+        anyhow::anyhow!("invalid {} at line {line}: {message}", path.display())
     })
 }
 
