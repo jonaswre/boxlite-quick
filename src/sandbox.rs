@@ -5,7 +5,7 @@ use crate::Workspace;
 use crate::reap::reap_box;
 use crate::runtime;
 use anyhow::Context;
-use boxlite::runtime::options::{BoxOptions, RootfsSpec};
+use boxlite::runtime::options::{BoxOptions, RootfsSpec, VolumeSpec};
 use boxlite::{BoxCommand, BoxStatus, GuestSession};
 use boxlite_shared::BoxTransport;
 use serde::{Deserialize, Serialize};
@@ -101,6 +101,15 @@ impl Sandboxes {
             rootfs: RootfsSpec::Image(image.into()),
             entrypoint: Some(vec![]),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
+            // Fixed once the Box exists, so a Sandbox keeps the binds it was created with.
+            volumes: ws
+                .shared_dirs()
+                .iter()
+                .map(|dir| {
+                    let dir = dir.to_string_lossy();
+                    VolumeSpec::bind_mount(dir.clone(), dir)
+                })
+                .collect(),
             auto_delete: Some(0),
             detach: true,
             ..Default::default()
