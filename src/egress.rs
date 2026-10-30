@@ -156,7 +156,7 @@ impl Approvals {
         // One entry per line.
         let hash = sha256_hex(&[sorted.join("\n").as_bytes()]);
         let mut file = self.read()?;
-        let key = key(ws);
+        let key = workspace_key(ws);
         if file.workspaces.get(&key) == Some(&hash) {
             return Ok(true);
         }
@@ -171,7 +171,7 @@ impl Approvals {
     /// Forgets the Workspace's approval, so its entries are asked about again.
     pub fn revoke(&self, ws: &Workspace) -> anyhow::Result<()> {
         let mut file = self.read()?;
-        if file.workspaces.remove(&key(ws)).is_some() {
+        if file.workspaces.remove(&workspace_key(ws)).is_some() {
             self.write(&file)?;
         }
         Ok(())
@@ -194,7 +194,7 @@ impl Approvals {
     }
 }
 
-fn key(ws: &Workspace) -> String {
+fn workspace_key(ws: &Workspace) -> String {
     ws.path().to_string_lossy().into_owned()
 }
 

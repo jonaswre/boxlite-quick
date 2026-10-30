@@ -60,12 +60,12 @@ impl ClaudeConfig {
         let guest_settings = read_guest(target, ".claude/settings.json").await?;
         let files = self.guest_files(ws, guest_json.as_deref(), guest_settings.as_deref())?;
         let untar = ["tar", "-x", "-f", "-", "-C", GUEST_HOME];
-        let ran = run(target, &untar, tar(&files)?).await?;
+        let untarred = run(target, &untar, tar(&files)?).await?;
         anyhow::ensure!(
-            ran.code == 0,
+            untarred.code == 0,
             "cannot copy the Claude config into the Sandbox: tar exited {}: {}",
-            ran.code,
-            ran.stderr.trim_end()
+            untarred.code,
+            untarred.stderr.trim_end()
         );
         Ok(())
     }
@@ -80,7 +80,7 @@ impl ClaudeConfig {
     ) -> anyhow::Result<Vec<GuestFile>> {
         let mut files = Vec::new();
         for name in COPIED {
-            copy(
+            collect_files(
                 &self.dir.join(name),
                 &guest_dir().join(name),
                 &mut Vec::new(),
@@ -104,7 +104,7 @@ impl ClaudeConfig {
         }
         settings.extend(host);
         settings.insert("skipDangerousModePermissionPrompt".into(), true.into());
-        object(&mut settings, "permissions")
+        object_at(&mut settings, "permissions")
             .insert("defaultMode".into(), "bypassPermissions".into());
         Ok(json_file(path, settings))
     }
@@ -125,7 +125,7 @@ impl ClaudeConfig {
         // Trust is keyed on the git root, which for a worktree is its main checkout's.
         for root in std::iter::once(ws.path().into()).chain(ws.main_checkout()) {
             let root = root.to_string_lossy();
-            let project = object(object(&mut claude_json, "projects"), &root);
+            let project = object_at(object_at(&mut claude_json, "projects"), &root);
             let host_project = host.get("projects").and_then(|p| p.get(&*root));
             for key in SYNCED_PROJECT_KEYS {
                 if let Some(value) = host_project.and_then(|p| p.get(key)) {
@@ -167,7 +167,7 @@ fn read_json(path: &Path) -> anyhow::Result<Map<String, Value>> {
 }
 
 /// The object at `key` in `map`, made one if it is anything else.
-fn object<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
+fn object_at<'a>(map: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
     let value = map.entry(key).or_insert(Value::Null);
     if !value.is_object() {
         *value = Map::new().into();
@@ -219,7 +219,7 @@ fn guest_dir() -> PathBuf {
 
 /// Adds `src` to `files` at `dest`, following symlinks. Whatever doesn't exist is skipped, as is
 /// a symlink back to a directory being copied, which `ancestors` holds.
-fn copy(
+fn collect_files(
     src: &Path,
     dest: &Path,
     ancestors: &mut Vec<PathBuf>,
@@ -242,7 +242,7 @@ fn copy(
             std::fs::read_dir(src).with_context(|| format!("cannot list {}", src.display()))?;
         for entry in entries {
             let name = entry?.file_name();
-            copy(&src.join(&name), &dest.join(&name), ancestors, files)?;
+            collect_files(&src.join(&name), &dest.join(&name), ancestors, files)?;
         }
         ancestors.pop();
     } else if meta.is_file() {
@@ -263,26 +263,26 @@ const GUEST_HOME: &str = "/root";
 async fn read_guest(target: &ExecTarget, path: &str) -> anyhow::Result<Option<String>> {
     let path = format!("{GUEST_HOME}/{path}");
     let script = r#"test -e "$1" || exit 100; cat "$1""#;
-    let ran = run(target, &["sh", "-c", script, "sh", &path], Vec::new()).await?;
-    match ran.code {
-        0 => Ok(Some(ran.stdout)),
+    let read = run(target, &["sh", "-c", script, "sh", &path], Vec::new()).await?;
+    match read.code {
+        0 => Ok(Some(read.stdout)),
         100 => Ok(None),
         code => anyhow::bail!(
             "cannot read {path} in the Sandbox: exited {code}: {}",
-            ran.stderr.trim_end()
+            read.stderr.trim_end()
         ),
     }
 }
 
 /// What a command run in the Sandbox printed, and how it exited.
-struct Ran {
+struct Output {
     stdout: String,
     stderr: String,
     code: i32,
 }
 
 /// Runs `argv` as root in the Sandbox with `stdin` as its input.
-async fn run(target: &ExecTarget, argv: &[&str], stdin: Vec<u8>) -> anyhow::Result<Ran> {
+async fn run(target: &ExecTarget, argv: &[&str], stdin: Vec<u8>) -> anyhow::Result<Output> {
     let token = CancellationToken::new();
     let _stop = token.clone().drop_guard();
     let command = target
@@ -315,7 +315,7 @@ async fn run(target: &ExecTarget, argv: &[&str], stdin: Vec<u8>) -> anyhow::Resu
         .recv()
         .await
         .with_context(|| format!("{} in the Sandbox ended without a result", argv[0]))?;
-    Ok(Ran {
+    Ok(Output {
         stdout,
         stderr,
         code: result.exit_code,

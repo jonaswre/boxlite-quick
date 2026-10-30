@@ -51,16 +51,16 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(t) => {
             let ws = t.workspace()?;
             let claude_config = ClaudeConfig::from_process_env()?;
-            let up = up(&sandboxes, &ws).await?;
-            claude::ensure_installed(&up.target).await?;
-            claude_config.sync(&ws, &up.target).await?;
-            let status = session::interactive(&up.target, &ws, session::CLAUDE).await?;
+            let sandbox = ready_sandbox(&sandboxes, &ws).await?;
+            claude::ensure_installed(&sandbox.target).await?;
+            claude_config.sync(&ws, &sandbox.target).await?;
+            let status = session::interactive(&sandbox.target, &ws, session::CLAUDE).await?;
             std::process::exit(status);
         }
         Command::Shell(t) => {
             let ws = t.workspace()?;
-            let up = up(&sandboxes, &ws).await?;
-            let status = session::interactive(&up.target, &ws, session::LOGIN_SHELL).await?;
+            let sandbox = ready_sandbox(&sandboxes, &ws).await?;
+            let status = session::interactive(&sandbox.target, &ws, session::LOGIN_SHELL).await?;
             std::process::exit(status);
         }
         Command::Ls => {
@@ -98,18 +98,18 @@ async fn main() -> anyhow::Result<()> {
 
 /// Creates the Workspace's Sandbox from the config, or reattaches to it, saying which and
 /// warning where the Sandbox no longer matches the config.
-async fn up(sandboxes: &Sandboxes, ws: &Workspace) -> anyhow::Result<Up> {
+async fn ready_sandbox(sandboxes: &Sandboxes, ws: &Workspace) -> anyhow::Result<Up> {
     let config = Config::from_process_env(ws)?;
     let auth = Auth::from_config(&config)?;
     let spec = Spec::new(config.image.as_deref(), &config.resources)?;
     let egress = Policy::from_process_env(ws, &config)?;
     let up = sandboxes.up(ws, &spec, &egress, &auth).await?;
-    let did = if up.created {
+    let action = if up.created {
         "Created"
     } else {
         "Reattached to"
     };
-    eprintln!("{did} the Sandbox for {}", ws.path().display());
+    eprintln!("{action} the Sandbox for {}", ws.path().display());
     let warning = up
         .as_created
         .as_ref()
