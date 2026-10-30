@@ -11,7 +11,7 @@ use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
 use boxq::Workspace;
 use boxq::auth::Auth;
 use boxq::claude_config::ClaudeConfig;
-use boxq::config::Egress;
+use boxq::config::{BaseUrl, Egress};
 use boxq::egress::Policy;
 use boxq::reap::reap_box;
 use boxq::sandbox::{ExecTarget, Listed, Sandboxes};
@@ -47,7 +47,10 @@ const FAKE_KEY: &str = "boxq-fake-key-6f1c0e9a7b2d4e58";
 
 /// Auth for tests that never reach the base URL.
 fn fake_auth() -> Auth {
-    Auth::new("https://cliproxy.boxq.invalid", FAKE_KEY).unwrap()
+    Auth::new(
+        &BaseUrl::parse("https://cliproxy.boxq.invalid").unwrap(),
+        FAKE_KEY,
+    )
 }
 
 /// A temporary boxq home with a temporary Workspace. Every Box in the home is removed on drop, so
@@ -120,7 +123,7 @@ fn policy(allow: &[&str], workspace_allow: &[&str], approved: bool) -> Policy {
         allow_host_loopback: false,
         workspace_allow: workspace_allow.iter().map(|&e| e.into()).collect(),
     };
-    Policy::new(&egress, None, approved, |_| vec![]).unwrap()
+    Policy::new(&egress, None, approved, |_| vec![])
 }
 
 /// The policy with no config files.
@@ -595,8 +598,14 @@ async fn the_guest_holds_only_the_placeholder_never_the_key() {
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_sandbox_reports_when_it_was_created_with_other_auth() {
     let f = Fixture::new();
-    let rotated = Auth::new("https://cliproxy.boxq.invalid", "boxq-rotated-key").unwrap();
-    let moved = Auth::new("https://moved.boxq.invalid", FAKE_KEY).unwrap();
+    let rotated = Auth::new(
+        &BaseUrl::parse("https://cliproxy.boxq.invalid").unwrap(),
+        "boxq-rotated-key",
+    );
+    let moved = Auth::new(
+        &BaseUrl::parse("https://moved.boxq.invalid").unwrap(),
+        FAKE_KEY,
+    );
     let (spec, policy, same) = (spec(IMAGE), default_policy(), fake_auth());
     let up = |auth| f.sandboxes.up(&f.workspace, &spec, &policy, auth);
 
@@ -656,7 +665,8 @@ async fn claude_code_authenticates_through_the_placeholder() {
         return;
     };
     let f = Fixture::new();
-    let auth = Auth::new(&base_url, &key).unwrap();
+    let base_url = BaseUrl::parse(&base_url).unwrap();
+    let auth = Auth::new(&base_url, &key);
     let egress = Egress {
         builtins: true,
         allow: vec![],
@@ -673,7 +683,7 @@ async fn claude_code_authenticates_through_the_placeholder() {
         });
         v4.collect()
     };
-    let policy = Policy::new(&egress, Some(&base_url), false, resolve).unwrap();
+    let policy = Policy::new(&egress, Some(&base_url), false, resolve);
 
     let up = f
         .sandboxes

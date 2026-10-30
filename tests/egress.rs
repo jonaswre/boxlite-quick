@@ -1,5 +1,5 @@
 use boxq::Workspace;
-use boxq::config::Egress;
+use boxq::config::{BaseUrl, Egress};
 use boxq::egress::{Approvals, Policy};
 use std::net::Ipv4Addr;
 
@@ -18,13 +18,17 @@ fn no_dns(_: &str) -> Vec<Ipv4Addr> {
     vec![]
 }
 
+fn url(base_url: &str) -> BaseUrl {
+    BaseUrl::parse(base_url).unwrap()
+}
+
 fn allow_net(policy: Policy) -> Vec<String> {
     policy.allow_net().to_vec()
 }
 
 #[test]
 fn by_default_the_policy_is_the_agents_entries_and_the_builtins() {
-    let policy = Policy::new(&defaults(), None, false, no_dns).unwrap();
+    let policy = Policy::new(&defaults(), None, false, no_dns);
 
     assert_eq!(
         allow_net(policy),
@@ -49,7 +53,7 @@ fn turning_the_builtins_off_keeps_the_entries_the_agent_needs() {
         ..defaults()
     };
 
-    let policy = Policy::new(&egress, None, false, no_dns).unwrap();
+    let policy = Policy::new(&egress, None, false, no_dns);
 
     // npm until the base image ships Claude Code preinstalled.
     assert_eq!(
@@ -67,8 +71,8 @@ fn global_entries_always_apply_and_workspace_entries_only_with_an_approval() {
         ..defaults()
     };
 
-    let unapproved = Policy::new(&egress, None, false, no_dns).unwrap();
-    let approved = Policy::new(&egress, None, true, no_dns).unwrap();
+    let unapproved = Policy::new(&egress, None, false, no_dns);
+    let approved = Policy::new(&egress, None, true, no_dns);
 
     assert_eq!(
         allow_net(unapproved),
@@ -110,11 +114,10 @@ fn the_base_urls_host_and_its_resolved_ips_are_always_allowed() {
 
     let policy = Policy::new(
         &egress,
-        Some("https://cliproxy.example.net/anthropic"),
+        Some(&url("https://cliproxy.example.net/anthropic")),
         false,
         resolve,
-    )
-    .unwrap();
+    );
 
     assert_eq!(
         allow_net(policy),
@@ -135,21 +138,11 @@ fn a_base_url_with_an_ip_host_allows_that_ip() {
         ..defaults()
     };
 
-    let policy = Policy::new(&egress, Some("http://10.0.0.5:8317"), false, no_dns).unwrap();
+    let policy = Policy::new(&egress, Some(&url("https://10.0.0.5")), false, no_dns);
 
     assert_eq!(
         allow_net(policy),
         ["10.0.0.5", "api.anthropic.com", "registry.npmjs.org"]
-    );
-}
-
-#[test]
-fn a_base_url_without_a_host_is_refused() {
-    let err = Policy::new(&defaults(), Some("cliproxy.example.net"), false, no_dns).unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "invalid base URL \"cliproxy.example.net\": use an http:// or https:// URL"
     );
 }
 
@@ -166,7 +159,7 @@ fn an_allowed_hostname_in_tailnet_space_also_allows_its_ip() {
         _ => vec![],
     };
 
-    let policy = Policy::new(&egress, None, false, resolve).unwrap();
+    let policy = Policy::new(&egress, None, false, resolve);
 
     assert_eq!(
         allow_net(policy),
@@ -189,7 +182,7 @@ fn an_approved_workspace_hostname_in_tailnet_space_also_allows_its_ip() {
     };
     let resolve = dns("git.tailnet.ts.net", &[[100, 64, 0, 1]]);
 
-    let policy = Policy::new(&egress, None, true, resolve).unwrap();
+    let policy = Policy::new(&egress, None, true, resolve);
 
     assert_eq!(
         allow_net(policy),
@@ -210,8 +203,8 @@ fn host_loopback_is_allowed_only_when_the_global_config_opens_it() {
         ..defaults()
     };
 
-    let closed = Policy::new(&closed, None, false, no_dns).unwrap();
-    let open = Policy::new(&open, None, false, no_dns).unwrap();
+    let closed = Policy::new(&closed, None, false, no_dns);
+    let open = Policy::new(&open, None, false, no_dns);
 
     assert!(!closed.allow_net().contains(&"192.168.127.254".into()));
     assert!(open.allow_net().contains(&"192.168.127.254".into()));
@@ -225,8 +218,8 @@ fn a_base_url_on_host_loopback_does_not_open_it() {
     };
     let resolve = dns("localhost", &[[127, 0, 0, 1]]);
 
-    let by_name = Policy::new(&egress, Some("http://localhost:8317"), false, resolve).unwrap();
-    let by_ip = Policy::new(&egress, Some("http://127.0.0.1:8317"), false, no_dns).unwrap();
+    let by_name = Policy::new(&egress, Some(&url("https://localhost")), false, resolve);
+    let by_ip = Policy::new(&egress, Some(&url("https://127.0.0.1")), false, no_dns);
 
     assert_eq!(
         allow_net(by_name),

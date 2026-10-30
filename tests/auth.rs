@@ -1,9 +1,13 @@
 use boxlite::runtime::options::BoxOptions;
 use boxq::Workspace;
 use boxq::auth::Auth;
-use boxq::config::Config;
+use boxq::config::{BaseUrl, Config};
 
 const KEY: &str = "sk-real-key-0123456789";
+
+fn auth(base_url: &str) -> Auth {
+    Auth::new(&BaseUrl::parse(base_url).unwrap(), KEY)
+}
 
 /// The Box options `auth` gives a Sandbox.
 fn applied(auth: &Auth) -> BoxOptions {
@@ -22,7 +26,7 @@ fn env<'a>(options: &'a BoxOptions, key: &str) -> Option<&'a str> {
 
 #[test]
 fn the_key_is_a_secret_scoped_to_the_base_url_host_and_the_guest_gets_its_placeholder() {
-    let auth = Auth::new("https://cliproxy.tailnet.ts.net/api", KEY).unwrap();
+    let auth = auth("https://cliproxy.tailnet.ts.net/api");
 
     let options = applied(&auth);
 
@@ -42,7 +46,7 @@ fn the_key_is_a_secret_scoped_to_the_base_url_host_and_the_guest_gets_its_placeh
 
 #[test]
 fn the_guest_env_never_holds_the_key_and_turns_off_claude_codes_nonessential_traffic() {
-    let auth = Auth::new("https://cliproxy.tailnet.ts.net", KEY).unwrap();
+    let auth = auth("https://cliproxy.tailnet.ts.net");
 
     let options = applied(&auth);
 
@@ -55,63 +59,6 @@ fn the_guest_env_never_holds_the_key_and_turns_off_claude_codes_nonessential_tra
     ] {
         assert_eq!(env(&options, key), Some("1"), "{key}");
     }
-}
-
-#[test]
-fn a_base_url_that_is_not_https_is_refused() {
-    for url in ["http://cliproxy.lan", "cliproxy.lan", "ftp://cliproxy.lan"] {
-        let err = Auth::new(url, KEY).unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            format!(
-                "base URL {url:?} must start with https://: \
-                 boxq can inject the API key only into HTTPS requests"
-            )
-        );
-    }
-}
-
-#[test]
-fn a_base_url_with_a_port_is_refused() {
-    for url in ["https://cliproxy.lan:8317", "https://cliproxy.lan:443/v1"] {
-        let err = Auth::new(url, KEY).unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            format!(
-                "base URL {url:?} must not name a port: \
-                 boxq can inject the API key only on HTTPS's default port"
-            )
-        );
-    }
-}
-
-#[test]
-fn a_base_url_must_name_a_plain_host() {
-    for url in [
-        "https://",
-        "https:///v1",
-        "https://[fd7a::1]/",
-        "https://bad host/",
-    ] {
-        let err = Auth::new(url, KEY).unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            format!("base URL {url:?} must name a hostname or IPv4 address")
-        );
-    }
-}
-
-#[test]
-fn a_base_url_carrying_credentials_is_refused_without_echoing_them() {
-    let err = Auth::new("https://user:hunter2@cliproxy.lan/", KEY).unwrap_err();
-
-    assert_eq!(
-        err.to_string(),
-        "the base URL must not carry credentials: put the API key in boxq's credentials file"
-    );
 }
 
 /// The Config boxq loads with no config files and `env` as the only settings.
@@ -162,7 +109,7 @@ fn auth_needs_both_a_base_url_and_an_api_key() {
 
 #[test]
 fn auth_never_prints_the_key() {
-    let auth = Auth::new("https://cliproxy.tailnet.ts.net", KEY).unwrap();
+    let auth = auth("https://cliproxy.tailnet.ts.net");
 
     assert!(!format!("{auth:?}").contains(KEY));
 }

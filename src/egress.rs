@@ -1,7 +1,7 @@
 //! The Egress Policy: which outbound destinations a Sandbox may reach (jonaswre/boxlite-quick#13).
 
 use crate::Workspace;
-use crate::config::{Config, Egress};
+use crate::config::{BaseUrl, Config, Egress};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use url::{Host, Url};
 
 /// What the Agent needs whatever the Global Config says. `registry.npmjs.org` serves the
 /// interim install of Claude Code (`crate::claude`), and goes once the base image ships it.
@@ -47,22 +46,22 @@ impl Policy {
             &config.egress.workspace_allow,
             ask_on_terminal,
         )?;
-        Self::new(
+        Ok(Self::new(
             &config.egress,
-            config.base_url.as_deref(),
+            config.base_url.as_ref(),
             approved,
             resolve,
-        )
+        ))
     }
 
     /// The policy from `egress` and the base URL, with the Workspace Config's entries only if
     /// `workspace_approved`. `resolve` gives a hostname's IPv4 addresses on the host.
     pub fn new(
         egress: &Egress,
-        base_url: Option<&str>,
+        base_url: Option<&BaseUrl>,
         workspace_approved: bool,
         resolve: impl Fn(&str) -> Vec<Ipv4Addr>,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let mut allow_net: Vec<String> = AGENT.iter().map(|&e| e.into()).collect();
         if egress.builtins {
             allow_net.extend(BUILTINS.iter().map(|&e| e.into()));
@@ -78,22 +77,20 @@ impl Policy {
             allow_net.push(entry.clone());
         }
         if let Some(url) = base_url {
-            let ips = match base_url_host(url)? {
-                Host::Domain(name) => {
-                    let ips = resolve(&name);
+            let ips = match url.ipv4() {
+                Some(ip) => vec![ip],
+                None => {
+                    let ips = resolve(url.host());
                     if ips.is_empty() {
                         eprintln!(
-                            "warning: cannot resolve the base URL's host {name}; allowing it by \
-                             name only"
+                            "warning: cannot resolve the base URL's host {}; allowing it by \
+                             name only",
+                            url.host()
                         );
                     }
-                    allow_net.push(name);
+                    allow_net.push(url.host().into());
                     ips
                 }
-                Host::Ipv4(ip) => vec![ip],
-                Host::Ipv6(_) => anyhow::bail!(
-                    "invalid base URL {url:?}: the Egress Policy cannot allow an IPv6 address"
-                ),
             };
             // An IP rule for host loopback would open it to any hostname that resolves there.
             let ips = ips.into_iter().filter(|&ip| !opens_host_loopback(ip, 32));
@@ -104,21 +101,13 @@ impl Policy {
         }
         allow_net.sort();
         allow_net.dedup();
-        Ok(Self { allow_net })
+        Self { allow_net }
     }
 
     /// The sorted, deduplicated entries.
     pub fn allow_net(&self) -> &[String] {
         &self.allow_net
     }
-}
-
-fn base_url_host(url: &str) -> anyhow::Result<Host> {
-    Url::parse(url)
-        .ok()
-        .filter(|u| matches!(u.scheme(), "http" | "https"))
-        .and_then(|u| u.host().map(|h| h.to_owned()))
-        .ok_or_else(|| anyhow::anyhow!("invalid base URL {url:?}: use an http:// or https:// URL"))
 }
 
 /// The Egress Approvals: for each Workspace, a hash of the Workspace Config `allow` entries the

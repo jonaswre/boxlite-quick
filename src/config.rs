@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// The merged, validated settings for one Workspace.
 #[derive(Debug)]
 pub struct Config {
-    pub base_url: Option<String>,
+    pub base_url: Option<BaseUrl>,
     pub api_key: Option<ApiKey>,
     pub image: Option<String>,
     pub setup: Option<String>,
@@ -84,6 +84,68 @@ pub struct Egress {
     pub workspace_allow: Vec<String>,
 }
 
+/// The base URL the Agent's API requests go to. Only `https://` on the default port, naming a
+/// hostname or IPv4 address and carrying no credentials, is one BoxLite can inject the API key
+/// into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseUrl {
+    url: String,
+    host: String,
+}
+
+impl BaseUrl {
+    pub fn parse(url: &str) -> anyhow::Result<Self> {
+        let Some(rest) = url.strip_prefix("https://") else {
+            anyhow::bail!(
+                "base URL {url:?} must start with https://: \
+                 boxq can inject the API key only into HTTPS requests"
+            );
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        // Not echoed, since the URL would print the credentials.
+        anyhow::ensure!(
+            !authority.contains('@'),
+            "the base URL must not carry credentials: put the API key in boxq's credentials file"
+        );
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        anyhow::ensure!(
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'),
+            "base URL {url:?} must name a hostname or IPv4 address"
+        );
+        // BoxLite 0.11 injects secrets only on port 443, and how to reach any other port is
+        // still undecided (the map's "Plain-HTTP or non-443 base URLs").
+        anyhow::ensure!(
+            port.is_none(),
+            "base URL {url:?} must not name a port: \
+             boxq can inject the API key only on HTTPS's default port"
+        );
+        Ok(Self {
+            url: url.into(),
+            host: host.to_ascii_lowercase(),
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.url
+    }
+
+    /// The hostname or IPv4 address, lowercased.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// The host's IPv4 address, if it names one rather than a hostname.
+    pub fn ipv4(&self) -> Option<Ipv4Addr> {
+        self.host.parse().ok()
+    }
+}
+
 /// The API key. Its `Debug` output is redacted so it never lands in a log.
 pub struct ApiKey(String);
 
@@ -147,7 +209,10 @@ impl Config {
         }
         Ok(Self {
             // The host's ANTHROPIC_* vars are deliberately never read.
-            base_url: env("BOXQ_BASE_URL").or(global.base_url),
+            base_url: env("BOXQ_BASE_URL")
+                .or(global.base_url)
+                .map(|url| BaseUrl::parse(&url))
+                .transpose()?,
             api_key: env("BOXQ_API_KEY").or(credentials.api_key).map(ApiKey),
             image: ws.image.or(global.image),
             setup: ws.setup.or(global.setup),
