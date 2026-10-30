@@ -598,6 +598,35 @@ async fn a_sandbox_reports_when_it_was_created_with_other_auth() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_sandbox_without_a_record_of_its_auth_reports_no_change() {
+    let f = Fixture::new();
+    // The Workspace's Box with no record, as one created before boxq recorded its auth.
+    let options = BoxOptions {
+        rootfs: RootfsSpec::Image(IMAGE.into()),
+        entrypoint: Some(vec![]),
+        cmd: Some(vec!["sleep".into(), "infinity".into()]),
+        auto_delete: Some(0),
+        detach: true,
+        ..Default::default()
+    };
+    let rt = f.runtime();
+    rt.create(options, Some(f.workspace.box_name()))
+        .await
+        .unwrap();
+    drop(rt);
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+
+    assert!(!up.created);
+    assert!(!up.auth_changed);
+}
+
 /// Needs a real base URL and key, so it reads them from `BOXQ_TEST_BASE_URL` and
 /// `BOXQ_TEST_API_KEY` and passes vacuously without them, as in CI.
 #[tokio::test(flavor = "multi_thread")]

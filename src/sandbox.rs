@@ -28,9 +28,9 @@ pub struct Up {
     pub target: ExecTarget,
     /// What the Sandbox was created from, or `None` if boxq has no record of it.
     pub as_created: Option<Spec>,
-    /// Whether the Sandbox was created with another base URL or API key, or boxq has no record
-    /// of which. A Box's secrets and env are fixed at creation, so it keeps those until it is
-    /// removed and created afresh.
+    /// Whether the Sandbox was created with another base URL or API key; `false` if boxq has no
+    /// record of which. A Box's secrets and env are fixed at creation, so it keeps those until it
+    /// is removed and created afresh.
     pub auth_changed: bool,
 }
 
@@ -126,7 +126,9 @@ impl Sandboxes {
                 .map_or((None, None), |r| (r.as_created, r.auth)),
             None => (Some(spec.clone()), Some(auth.fingerprint())),
         };
-        let auth_changed = created_auth.as_deref() != Some(auth.fingerprint().as_str());
+        let auth_changed = created_auth
+            .as_ref()
+            .is_some_and(|created| *created != auth.fingerprint());
         // The record goes first, so a Box never exists without one.
         self.write_record(ws, as_created.clone(), created_auth)?;
         let mut options = BoxOptions {
