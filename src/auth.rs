@@ -2,9 +2,9 @@
 //! the guest only ever holds a placeholder (jonaswre/boxlite-quick#14).
 
 use crate::config::{BaseUrl, Config};
+use crate::digest::sha256_hex;
 use anyhow::Context;
 use boxlite::runtime::options::{BoxOptions, Secret};
-use sha2::{Digest, Sha256};
 
 /// What the guest holds in place of the API key. BoxLite swaps it for the key in HTTPS
 /// requests to the base URL's host.
@@ -66,14 +66,10 @@ impl Auth {
     /// A digest that tells two Auths apart without holding the key. BoxLite's own database,
     /// in the same home, already holds the key itself, so this exposes nothing new.
     pub(crate) fn fingerprint(&self) -> String {
-        let mut digest = Sha256::new();
-        digest.update(self.base_url.as_str().as_bytes());
-        digest.update([0]);
-        digest.update(self.secret.value.as_bytes());
-        digest
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        sha256_hex(&[
+            self.base_url.as_str().as_bytes(),
+            &[0],
+            self.secret.value.as_bytes(),
+        ])
     }
 }

@@ -2,9 +2,9 @@
 
 use crate::Workspace;
 use crate::config::{BaseUrl, Config, Egress, HOST_LOOPBACK, opens_host_loopback};
+use crate::digest::sha256_hex;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -158,7 +158,8 @@ impl Approvals {
         let mut sorted = entries.to_vec();
         sorted.sort();
         sorted.dedup();
-        let hash = hash(&sorted);
+        // One entry per line.
+        let hash = sha256_hex(&[sorted.join("\n").as_bytes()]);
         let mut file = self.read()?;
         let key = key(ws);
         if file.workspaces.get(&key) == Some(&hash) {
@@ -206,12 +207,6 @@ impl Approvals {
 
 fn key(ws: &Workspace) -> String {
     ws.path().to_string_lossy().into_owned()
-}
-
-/// The SHA-256 of sorted `entries`, one per line, in hex.
-fn hash(entries: &[String]) -> String {
-    let digest = Sha256::digest(entries.join("\n"));
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Lists `entries` and asks y/N on the terminal. With no terminal to ask on, the answer is no.

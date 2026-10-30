@@ -4,6 +4,7 @@ pub mod auth;
 pub mod claude;
 pub mod claude_config;
 pub mod config;
+mod digest;
 pub mod egress;
 pub mod reap;
 pub mod runtime;
