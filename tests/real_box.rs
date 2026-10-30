@@ -1,126 +1,86 @@
-//! Boots a real Box, so it needs Linux x86_64, KVM and BoxLite's host prerequisites. Run with
+//! Boots real Boxes, so it needs Linux x86_64, KVM and BoxLite's host prerequisites. Run with
 //! `cargo test --test real_box -- --ignored`; CI runs it on every push.
 //!
 //! boxq execs through the Box's own `box.sock` so no runtime (and no `BOXLITE_HOME` lock) is
 //! held during a session (jonaswre/boxlite-quick#8). That leans on BoxLite internals: the
-//! socket layout, the `BOXLITE_EXECUTOR` env protocol and the container-id directory. This
-//! test pins them, so any BoxLite bump must pass it. Once boxq has its own lock-free exec
-//! target (jonaswre/boxlite-quick#10), this test should drive that instead of BoxLite directly.
+//! socket layout, the `BOXLITE_EXECUTOR` env protocol and the container-id directory. These
+//! tests drive boxq's own exec target, so any BoxLite bump must pass them.
 
+use boxlite::BoxliteRuntime;
 use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
-use boxlite::{BoxCommand, BoxliteRuntime, GuestSession, LiteBox};
-use boxlite_shared::BoxTransport;
+use boxq::Workspace;
 use boxq::reap::reap_box;
+use boxq::sandbox::{ExecTarget, Listed, Sandboxes};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
-const BOX_NAME: &str = "boxq-real-box-test";
+/// Small and quick to pull; boxq's real image only matters to the Agent.
+const IMAGE: &str = "alpine:3";
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "boots a real Box; needs KVM"]
-async fn a_command_runs_through_box_sock_while_the_runtime_is_held() {
-    let home = tempfile::tempdir().unwrap();
-    let rt = runtime(home.path());
-    let b = create(&rt).await;
-
-    let ran = run_while_held(&b, home.path()).await;
-
-    // Clean up before asserting, so a failure never leaves a VM running.
-    clean_up(&rt, &b, home.path()).await;
-
-    let (lock_held, stdout, exit_code) = ran.unwrap();
-    assert!(lock_held, "the runtime should hold the BOXLITE_HOME lock");
-    assert_eq!((stdout.as_str(), exit_code), ("hello from the box\n", 0));
+/// A temporary boxq home with a temporary Workspace. Every Box in the home is removed on drop, so
+/// a failing test never leaves a VM running.
+struct Fixture {
+    sandboxes: Sandboxes,
+    workspace: Workspace,
+    dirs: Vec<tempfile::TempDir>,
 }
 
-/// BoxLite 0.11 leaks the shim and VM on `stop` wherever it can't create the Box's cgroup,
-/// which includes GitHub's runners (jonaswre/boxlite-quick#19). Remove `reap_box` once a BoxLite
-/// release reaps the tree itself (boxlite-ai/boxlite#1240), and this test still passes.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "boots a real Box; needs KVM"]
-async fn no_shim_survives_stop_or_rm_once_reaped() {
-    let home = tempfile::tempdir().unwrap();
-    let rt = runtime(home.path());
-    let b = create(&rt).await;
+impl Fixture {
+    fn new() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let mut f = Self {
+            sandboxes: Sandboxes::new(home.path()),
+            workspace: Workspace::resolve(home.path()).unwrap(),
+            dirs: vec![home],
+        };
+        f.workspace = f.another_workspace();
+        f
+    }
 
-    let survivors = stop_then_rm(&rt, &b, home.path()).await;
+    fn another_workspace(&mut self) -> Workspace {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::resolve(dir.path()).unwrap();
+        self.dirs.push(dir);
+        ws
+    }
 
-    clean_up(&rt, &b, home.path()).await;
-
-    let (after_stop, after_rm) = survivors.unwrap();
-    assert_eq!(after_stop, Vec::<PathBuf>::new(), "shims left after stop");
-    assert_eq!(after_rm, Vec::<PathBuf>::new(), "shims left after rm");
+    /// A BoxLite runtime on the home, as another process would open it.
+    fn runtime(&self) -> BoxliteRuntime {
+        BoxliteRuntime::new(BoxliteOptions {
+            home_dir: self.sandboxes.boxlite_home(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
 }
 
-/// Starts and stops the Box, then starts and force-removes it, reaping after each. Returns the
-/// shims still running after each reap.
-async fn stop_then_rm(
-    rt: &BoxliteRuntime,
-    b: &LiteBox,
-    home: &Path,
-) -> anyhow::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    let id = b.id().to_string();
-    b.start().await?;
-    b.stop().await?;
-    reap_box(home, &id)?;
-    let after_stop = shims(home)?;
-
-    // `stop` invalidates the handle.
-    let b = rt
-        .get(BOX_NAME)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the stopped Box is gone"))?;
-    b.start().await?;
-    rt.remove(BOX_NAME, true).await?;
-    reap_box(home, &id)?;
-    Ok((after_stop, shims(home)?))
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let home = self.sandboxes.boxlite_home();
+        let rt = self.runtime();
+        let clean_up = async {
+            for b in rt.list_info().await.unwrap_or_default() {
+                let _ = rt.remove(b.id.as_ref(), true).await;
+                let _ = reap_box(&home, b.id.as_ref());
+            }
+        };
+        // Drop runs inside the test's own tokio runtime, which can't be blocked on.
+        std::thread::scope(|s| {
+            s.spawn(|| tokio::runtime::Runtime::new().unwrap().block_on(clean_up));
+        });
+    }
 }
 
-fn runtime(home: &Path) -> BoxliteRuntime {
-    BoxliteRuntime::new(BoxliteOptions {
-        home_dir: home.into(),
-        ..Default::default()
-    })
-    .unwrap()
-}
-
-async fn create(rt: &BoxliteRuntime) -> LiteBox {
-    let options = BoxOptions {
-        rootfs: RootfsSpec::Image("alpine:3".into()),
-        entrypoint: Some(vec![]),
-        cmd: Some(vec!["sleep".into(), "infinity".into()]),
-        auto_delete: Some(0),
-        detach: true,
-        ..Default::default()
-    };
-    rt.create(options, Some(BOX_NAME.into())).await.unwrap()
-}
-
-/// Starts the Box, then, with the runtime still open, runs `echo` in it through `box.sock`.
-async fn run_while_held(b: &LiteBox, home: &Path) -> anyhow::Result<(bool, String, i32)> {
-    b.start().await?;
-    let box_dir = home.join("boxes").join(b.id().to_string());
-
-    let lock_held = BoxliteRuntime::new(BoxliteOptions {
-        home_dir: home.into(),
-        ..Default::default()
-    })
-    .is_err();
-
-    let session = GuestSession::new(BoxTransport::Unix {
-        socket_path: box_dir.join("sockets/box.sock"),
-    });
-    let cmd = BoxCommand::new("echo")
-        .args(["hello from the box"])
-        .env(
-            "BOXLITE_EXECUTOR",
-            format!("container={}", container_id(&box_dir)?),
-        )
-        .working_dir("/");
+/// Runs `sh -c script` through `target`, returning its stdout and exit code.
+async fn sh(target: &ExecTarget, script: &str) -> anyhow::Result<(String, i32)> {
     let token = CancellationToken::new();
-    let mut exec = session.execution().await?.exec(cmd, token.clone()).await?;
+    let mut exec = target
+        .session()
+        .execution()
+        .await?
+        .exec(target.command("sh").args(["-c", script]), token.clone())
+        .await?;
     drop(exec.stdin_tx);
-
     let mut stdout = String::new();
     while let Some(chunk) = exec.stdout_rx.recv().await {
         stdout.push_str(&chunk);
@@ -131,12 +91,55 @@ async fn run_while_held(b: &LiteBox, home: &Path) -> anyhow::Result<(bool, Strin
         .await
         .ok_or_else(|| anyhow::anyhow!("exec ended without a result"))?;
     token.cancel();
-    Ok((lock_held, stdout, result.exit_code))
+    Ok((stdout, result.exit_code))
 }
 
-async fn clean_up(rt: &BoxliteRuntime, b: &LiteBox, home: &Path) {
-    let _ = rt.remove(BOX_NAME, true).await;
-    let _ = reap_box(home, b.id().as_ref());
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime() {
+    let f = Fixture::new();
+
+    let up = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let held = f.runtime();
+    let ran = sh(&up.target, "echo hello from the sandbox").await.unwrap();
+    drop(held);
+
+    assert!(up.created);
+    assert_eq!(ran, ("hello from the sandbox\n".into(), 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_stopped_sandbox_is_reattached_with_its_state() {
+    let f = Fixture::new();
+    let first = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    sh(&first.target, "echo kept > /root/state").await.unwrap();
+
+    f.sandboxes.stop(&f.workspace).await.unwrap();
+    let again = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+
+    assert!(!again.created);
+    let read = sh(&again.target, "cat /root/state").await.unwrap();
+    assert_eq!(read, ("kept\n".into(), 0));
+}
+
+/// BoxLite 0.11 leaks the shim and VM on `stop` wherever it can't create the Box's cgroup,
+/// which includes GitHub's runners (jonaswre/boxlite-quick#19). Remove `reap_box` once a BoxLite
+/// release reaps the tree itself (boxlite-ai/boxlite#1240), and this test still passes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn no_shim_survives_stop_or_rm() {
+    let f = Fixture::new();
+
+    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes.stop(&f.workspace).await.unwrap();
+    let after_stop = shims(&f.sandboxes.boxlite_home()).unwrap();
+    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes.rm(&f.workspace).await.unwrap();
+    let after_rm = shims(&f.sandboxes.boxlite_home()).unwrap();
+
+    assert_eq!(after_stop, Vec::<PathBuf>::new(), "shims left after stop");
+    assert_eq!(after_rm, Vec::<PathBuf>::new(), "shims left after rm");
 }
 
 /// The executables of the processes running a shim from under `home`.
@@ -154,12 +157,87 @@ fn shims(home: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
-/// The container id is `pub(crate)` in BoxLite 0.11; it is the one directory name under
-/// `boxes/<id>/shared/containers/`.
-fn container_id(box_dir: &Path) -> anyhow::Result<String> {
-    let mut ids = std::fs::read_dir(box_dir.join("shared/containers"))?
-        .map(|e| Ok(e?.file_name().to_string_lossy().into_owned()))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    anyhow::ensure!(ids.len() == 1, "expected one container, found {ids:?}");
-    Ok(ids.pop().unwrap())
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_removed_sandbox_is_created_afresh() {
+    let f = Fixture::new();
+    let first = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    sh(&first.target, "echo gone > /root/state").await.unwrap();
+
+    f.sandboxes.rm(&f.workspace).await.unwrap();
+    let again = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+
+    assert!(again.created);
+    let read = sh(&again.target, "test -e /root/state").await.unwrap();
+    assert_eq!(read.1, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn stop_and_rm_refuse_a_workspace_without_a_sandbox() {
+    let f = Fixture::new();
+
+    let stop = f.sandboxes.stop(&f.workspace).await.unwrap_err();
+    let rm = f.sandboxes.rm(&f.workspace).await.unwrap_err();
+
+    let expected = format!("{} has no Sandbox", f.workspace.path().display());
+    assert_eq!(
+        (stop.to_string(), rm.to_string()),
+        (expected.clone(), expected)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn sandboxes_are_listed_by_workspace_path() {
+    let mut f = Fixture::new();
+    let (a, b) = (f.another_workspace(), f.another_workspace());
+    let (running, stopped) = if a.path() < b.path() { (a, b) } else { (b, a) };
+    f.sandboxes.up(&stopped, IMAGE).await.unwrap();
+    f.sandboxes.stop(&stopped).await.unwrap();
+    f.sandboxes.up(&running, IMAGE).await.unwrap();
+    // A Box boxq has no record of, as if its record were lost.
+    let options = BoxOptions {
+        rootfs: RootfsSpec::Image(IMAGE.into()),
+        auto_delete: Some(0),
+        detach: true,
+        ..Default::default()
+    };
+    let rt = f.runtime();
+    rt.create(options, Some("boxq-orphan".into()))
+        .await
+        .unwrap();
+    drop(rt);
+
+    let listed = f.sandboxes.list().await.unwrap();
+
+    let row = |ws: Option<&Workspace>, name: &str, running| Listed {
+        workspace: ws.map(|ws| ws.path().into()),
+        box_name: name.into(),
+        running,
+    };
+    assert_eq!(
+        listed,
+        [
+            row(Some(&running), &running.box_name(), true),
+            row(Some(&stopped), &stopped.box_name(), false),
+            row(None, "boxq-orphan", false),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn up_waits_for_a_runtime_another_process_holds() {
+    let f = Fixture::new();
+    let held = f.runtime();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        drop(held);
+    });
+
+    let up = f.sandboxes.up(&f.workspace, IMAGE).await;
+    release.join().unwrap();
+
+    assert!(up.unwrap().created);
 }

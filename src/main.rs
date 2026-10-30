@@ -1,7 +1,12 @@
 use boxq::Workspace;
 use boxq::config::Config;
+use boxq::sandbox::Sandboxes;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+
+/// The image every Sandbox is created from, until the base image leaves the map's fog and the
+/// configured image is used (jonaswre/boxlite-quick#18).
+const INTERIM_IMAGE: &str = "node:22-bookworm";
 
 /// Run Claude Code against a Workspace inside an isolated Sandbox.
 #[derive(Parser)]
@@ -37,20 +42,44 @@ impl Target {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let (name, target) = match Cli::parse().command {
-        Command::Run(t) => ("run", Some(t)),
-        Command::Shell(t) => ("shell", Some(t)),
-        Command::Ls => ("ls", None),
-        Command::Stop(t) => ("stop", Some(t)),
-        Command::Rm(t) => ("rm", Some(t)),
-    };
-    if let Some(target) = target {
-        let ws = target.workspace()?;
-        eprintln!("Workspace {} (Box {})", ws.path().display(), ws.box_name());
-        if matches!(name, "run" | "shell") {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let sandboxes = Sandboxes::from_process_env()?;
+    match Cli::parse().command {
+        Command::Run(t) => {
+            let ws = t.workspace()?;
             Config::from_process_env(&ws)?;
+            let up = sandboxes.up(&ws, INTERIM_IMAGE).await?;
+            let did = if up.created {
+                "Created"
+            } else {
+                "Reattached to"
+            };
+            eprintln!("{did} the Sandbox for {}", ws.path().display());
+        }
+        Command::Shell(t) => {
+            Config::from_process_env(&t.workspace()?)?;
+            anyhow::bail!("`boxq shell` is not implemented yet");
+        }
+        Command::Ls => {
+            for s in sandboxes.list().await? {
+                let state = if s.running { "running" } else { "stopped" };
+                match s.workspace {
+                    Some(ws) => println!("{state}  {}", ws.display()),
+                    None => println!("{state}  (Workspace unknown; Box {})", s.box_name),
+                }
+            }
+        }
+        Command::Stop(t) => {
+            let ws = t.workspace()?;
+            sandboxes.stop(&ws).await?;
+            eprintln!("Stopped the Sandbox for {}", ws.path().display());
+        }
+        Command::Rm(t) => {
+            let ws = t.workspace()?;
+            sandboxes.rm(&ws).await?;
+            eprintln!("Removed the Sandbox for {}", ws.path().display());
         }
     }
-    anyhow::bail!("`boxq {name}` is not implemented yet")
+    Ok(())
 }
