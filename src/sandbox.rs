@@ -3,10 +3,14 @@
 
 use crate::Workspace;
 use crate::auth::Auth;
+use crate::egress::Policy;
 use crate::reap::reap_box;
 use crate::runtime;
+use crate::spec::Spec;
 use anyhow::Context;
-use boxlite::runtime::options::{BoxOptions, RootfsSpec, VolumeSpec};
+use boxlite::runtime::options::{
+    BoxOptions, NetworkMode, NetworkSpec, OutboundNetworkConfig, RootfsSpec, VolumeSpec,
+};
 use boxlite::{BoxCommand, BoxStatus, GuestSession};
 use boxlite_shared::BoxTransport;
 use serde::{Deserialize, Serialize};
@@ -21,10 +25,13 @@ pub struct Sandboxes {
 pub struct Up {
     /// Whether `up` created the Sandbox, rather than reattaching to it.
     pub created: bool,
-    /// Whether the Sandbox was created with another base URL or API key. A Box's secrets and
-    /// env are fixed at creation, so it keeps those until it is removed and created afresh.
-    pub auth_changed: bool,
     pub target: ExecTarget,
+    /// What the Sandbox was created from, or `None` if boxq has no record of it.
+    pub as_created: Option<Spec>,
+    /// Whether the Sandbox was created with another base URL or API key, or boxq has no record
+    /// of which. A Box's secrets and env are fixed at creation, so it keeps those until it is
+    /// removed and created afresh.
+    pub auth_changed: bool,
 }
 
 /// One Sandbox as `list` reports it.
@@ -40,6 +47,12 @@ pub struct Listed {
 #[derive(Serialize, Deserialize)]
 struct Record {
     workspace: PathBuf,
+    /// `None` for a Box created before boxq recorded its Spec, or whose record was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_created: Option<Spec>,
+    /// [`Auth::fingerprint`] of what the Sandbox was created with; `None` like `as_created`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth: Option<String>,
 }
 
 /// What a command needs to run in a Sandbox with no runtime open: the Box's own socket, and the
@@ -95,14 +108,32 @@ impl Sandboxes {
         self.home.join("boxlite")
     }
 
-    /// Creates the Workspace's Sandbox from `image` with `auth`, or reattaches to the one it has,
-    /// and makes sure it runs.
-    pub async fn up(&self, ws: &Workspace, image: &str, auth: &Auth) -> anyhow::Result<Up> {
-        // The record goes first, so a Box never exists without one.
-        self.write_record(ws)?;
+    /// Creates the Workspace's Sandbox from `spec` with `auth`, or reattaches to the one it has,
+    /// and makes sure it runs under `egress`. A Sandbox keeps the Spec and auth it was created
+    /// with.
+    pub async fn up(
+        &self,
+        ws: &Workspace,
+        spec: &Spec,
+        egress: &Policy,
+        auth: &Auth,
+    ) -> anyhow::Result<Up> {
         let rt = runtime::open(&self.boxlite_home())?;
+        // The runtime's lock keeps the Box from appearing or vanishing until it is created.
+        let (as_created, created_auth) = match rt.get_info(&ws.box_name()).await? {
+            Some(_) => self
+                .read_record(&ws.box_name())?
+                .map_or((None, None), |r| (r.as_created, r.auth)),
+            None => (Some(spec.clone()), Some(auth.fingerprint())),
+        };
+        let auth_changed = created_auth.as_deref() != Some(auth.fingerprint().as_str());
+        // The record goes first, so a Box never exists without one.
+        self.write_record(ws, as_created.clone(), created_auth)?;
         let mut options = BoxOptions {
-            rootfs: RootfsSpec::Image(image.into()),
+            rootfs: RootfsSpec::Image(spec.image.clone()),
+            cpus: spec.cpus,
+            memory_mib: spec.memory_mib,
+            disk_size_gb: spec.disk_gib,
             entrypoint: Some(vec![]),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             // Fixed once the Box exists, so a Sandbox keeps the binds it was created with.
@@ -114,26 +145,37 @@ impl Sandboxes {
                     VolumeSpec::bind_mount(dir.clone(), dir)
                 })
                 .collect(),
+            // So a new Box never boots with the full access an unset policy means.
+            network: NetworkSpec::Enabled {
+                allow_net: egress.allow_net().to_vec(),
+            },
             auto_delete: Some(0),
             detach: true,
             ..Default::default()
         };
         auth.apply(&mut options);
         let (b, created) = rt.get_or_create(options, Some(ws.box_name())).await?;
-        let auth_changed = self.check_auth(ws, auth, created)?;
         if b.info().await?.status != BoxStatus::Running {
             // A VM leaked by an earlier stop must never share the disk with this one.
             reap_box(&self.boxlite_home(), b.id().as_ref())?;
             b.start().await?;
         }
+        // The Global Config or an Egress Approval may have changed since the Box was created.
+        b.network()
+            .update_outbound(OutboundNetworkConfig {
+                mode: NetworkMode::Enabled,
+                allow_net: egress.allow_net().to_vec(),
+            })
+            .await?;
         let box_dir = self.boxlite_home().join("boxes").join(b.id().as_ref());
         Ok(Up {
             created,
-            auth_changed,
             target: ExecTarget {
                 socket: box_dir.join("sockets/box.sock"),
                 container_id: container_id(&box_dir)?,
             },
+            as_created,
+            auth_changed,
         })
     }
 
@@ -157,18 +199,13 @@ impl Sandboxes {
         };
         rt.remove(&ws.box_name(), true).await?;
         reap_box(&self.boxlite_home(), info.id.as_ref())?;
-        for record in [
-            self.record_path(&ws.box_name()),
-            self.auth_path(&ws.box_name()),
-        ] {
-            match std::fs::remove_file(&record) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(e).with_context(|| format!("cannot remove {}", record.display()));
-                }
-                _ => {}
+        let record = self.record_path(&ws.box_name());
+        match std::fs::remove_file(&record) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(e).with_context(|| format!("cannot remove {}", record.display()))
             }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     /// Every Sandbox, ordered by Workspace path, with any whose record is lost last.
@@ -197,31 +234,17 @@ impl Sandboxes {
         self.home.join("sandboxes").join(format!("{box_name}.toml"))
     }
 
-    fn auth_path(&self, box_name: &str) -> PathBuf {
-        self.home.join("sandboxes").join(format!("{box_name}.auth"))
-    }
-
-    /// Records the auth a new Sandbox was created with, or tells whether a reattached one's
-    /// differs from `auth`. A Sandbox with no auth record is reported changed, since its auth
-    /// is unknown.
-    fn check_auth(&self, ws: &Workspace, auth: &Auth, created: bool) -> anyhow::Result<bool> {
-        let path = self.auth_path(&ws.box_name());
-        if created {
-            std::fs::write(&path, auth.fingerprint())
-                .with_context(|| format!("cannot write {}", path.display()))?;
-            return Ok(false);
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(fingerprint) => Ok(fingerprint != auth.fingerprint()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-            Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
-        }
-    }
-
-    fn write_record(&self, ws: &Workspace) -> anyhow::Result<()> {
+    fn write_record(
+        &self,
+        ws: &Workspace,
+        as_created: Option<Spec>,
+        auth: Option<String>,
+    ) -> anyhow::Result<()> {
         let path = self.record_path(&ws.box_name());
         let record = Record {
             workspace: ws.path().into(),
+            as_created,
+            auth,
         };
         let toml = toml::to_string(&record)
             .with_context(|| format!("cannot record Workspace {}", ws.path().display()))?;
