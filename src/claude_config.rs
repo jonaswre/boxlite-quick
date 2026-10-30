@@ -284,11 +284,14 @@ struct Ran {
     code: i32,
 }
 
-/// Runs `argv` in the Sandbox with `stdin` as its input.
+/// Runs `argv` as root in the Sandbox with `stdin` as its input.
 async fn run(target: &ExecTarget, argv: &[&str], stdin: Vec<u8>) -> anyhow::Result<Ran> {
     let token = CancellationToken::new();
     let _stop = token.clone().drop_guard();
-    let command = target.command(argv[0]).args(argv[1..].iter().copied());
+    let command = target
+        .command(argv[0])
+        .args(argv[1..].iter().copied())
+        .user("root");
     let mut exec = target
         .session()
         .execution()

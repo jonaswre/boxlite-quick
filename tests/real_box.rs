@@ -26,6 +26,9 @@ const IMAGE: &str = "alpine:3";
 /// Alpine with git, for the tests that run git in a Sandbox.
 const GIT_IMAGE: &str = "alpine/git:2.49.1";
 
+/// Alpine whose user is not root, for the tests that boxq runs as root whatever the image says.
+const NON_ROOT_IMAGE: &str = "haproxy:3.2-alpine";
+
 /// `image` with BoxLite's default resources.
 fn spec(image: &str) -> Spec {
     Spec {
@@ -125,14 +128,27 @@ fn default_policy() -> Policy {
     policy(&[], &[], false)
 }
 
-/// Runs `sh -c script` through `target`, returning its stdout and exit code.
+/// Runs `sh -c script` through `target` as the image's user, returning its stdout and exit code.
 async fn sh(target: &ExecTarget, script: &str) -> anyhow::Result<(String, i32)> {
+    exec(target, target.command("sh").args(["-c", script])).await
+}
+
+/// [`sh`] as root.
+async fn root_sh(target: &ExecTarget, script: &str) -> anyhow::Result<(String, i32)> {
+    exec(
+        target,
+        target.command("sh").args(["-c", script]).user("root"),
+    )
+    .await
+}
+
+async fn exec(target: &ExecTarget, command: boxlite::BoxCommand) -> anyhow::Result<(String, i32)> {
     let token = CancellationToken::new();
     let mut exec = target
         .session()
         .execution()
         .await?
-        .exec(target.command("sh").args(["-c", script]), token.clone())
+        .exec(command, token.clone())
         .await?;
     drop(exec.stdin_tx);
     let mut stdout = String::new();
@@ -781,6 +797,32 @@ async fn a_sandbox_without_claude_config_gets_one() {
     .await
     .unwrap();
     assert_eq!(ran, ("1\n# Review\n".into(), 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn the_claude_config_reaches_roots_home_whatever_the_images_user() {
+    let mut f = Fixture::new();
+    let host = host_claude_config(&f.temp_dir(), &f.workspace);
+    let up = f
+        .sandboxes
+        .up(
+            &f.workspace,
+            &spec(NON_ROOT_IMAGE),
+            &default_policy(),
+            &f.auth,
+        )
+        .await
+        .unwrap();
+    let (user, _) = sh(&up.target, "id -u").await.unwrap();
+    assert_ne!(user, "0\n", "the image's user is root");
+
+    host.sync(&f.workspace, &up.target).await.unwrap();
+
+    let synced = root_sh(&up.target, "cat /root/.claude/skills/review/SKILL.md")
+        .await
+        .unwrap();
+    assert_eq!(synced, ("# Review\n".into(), 0));
 }
 
 /// What Claude Code's TUI draws in `target`'s Sandbox in its first seconds after `input` is
