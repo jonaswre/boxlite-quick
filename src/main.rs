@@ -1,6 +1,8 @@
 use boxq::Workspace;
+use boxq::claude;
 use boxq::config::Config;
 use boxq::sandbox::Sandboxes;
+use boxq::session;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -56,10 +58,16 @@ async fn main() -> anyhow::Result<()> {
                 "Reattached to"
             };
             eprintln!("{did} the Sandbox for {}", ws.path().display());
+            claude::ensure_installed(&up.target).await?;
+            let status = session::interactive(&up.target, &ws, session::CLAUDE).await?;
+            std::process::exit(status);
         }
         Command::Shell(t) => {
-            Config::from_process_env(&t.workspace()?)?;
-            anyhow::bail!("`boxq shell` is not implemented yet");
+            let ws = t.workspace()?;
+            Config::from_process_env(&ws)?;
+            let up = sandboxes.up(&ws, INTERIM_IMAGE).await?;
+            let status = session::interactive(&up.target, &ws, session::LOGIN_SHELL).await?;
+            std::process::exit(status);
         }
         Command::Ls => {
             for s in sandboxes.list().await? {
