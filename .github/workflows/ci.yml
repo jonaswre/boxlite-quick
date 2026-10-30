@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc, which BoxLite's build needs
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo test --locked
 
   # Boots a real Box. Only x86_64 hosted runners expose /dev/kvm (jonaswre/boxlite#4).
@@ -23,6 +25,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc, which BoxLite's build needs
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Give the runner user /dev/kvm
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
