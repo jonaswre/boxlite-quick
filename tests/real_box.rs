@@ -1188,10 +1188,13 @@ async fn claude_code_is_installed_once_in_a_sandbox_without_it() {
         .await
         .unwrap();
 
-    let first = boxq::claude::ensure_installed(&up.target).await.unwrap();
-    let again = boxq::claude::ensure_installed(&up.target).await.unwrap();
+    boxq::claude::ensure_installed(&up.target).await.unwrap();
+    // Without npm, only a Sandbox that skips the install still succeeds.
+    let removed = sh(&up.target, r#"rm "$(command -v npm)""#).await.unwrap();
+    let again = boxq::claude::ensure_installed(&up.target).await;
 
-    assert_eq!((first, again), (true, false));
+    assert_eq!(removed.1, 0, "{removed:?}");
+    assert!(again.is_ok(), "{again:?}");
     let (version, code) = sh(&up.target, "claude --version").await.unwrap();
     assert_eq!(code, 0, "claude --version printed {version:?}");
     assert_eq!(version, "2.1.312 (Claude Code)\n");

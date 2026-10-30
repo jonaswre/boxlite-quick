@@ -9,10 +9,10 @@ use tokio_util::sync::CancellationToken;
 /// Sandbox's env turns off its self-updates, so it stays at this release.
 const PACKAGE: &str = "@anthropic-ai/claude-code@2.1.312";
 
-/// Installs Claude Code in the Sandbox unless it has it, returning whether it installed it.
-pub async fn ensure_installed(target: &ExecTarget) -> anyhow::Result<bool> {
+/// Installs Claude Code in the Sandbox unless it has it.
+pub async fn ensure_installed(target: &ExecTarget) -> anyhow::Result<()> {
     if run_as_root(target, "command -v claude", false).await? == 0 {
-        return Ok(false);
+        return Ok(());
     }
     eprintln!("Installing Claude Code in the Sandbox (once)...");
     let install = format!(
@@ -24,7 +24,7 @@ pub async fn ensure_installed(target: &ExecTarget) -> anyhow::Result<bool> {
         status == 0,
         "cannot install Claude Code in the Sandbox: the install exited with {status}"
     );
-    Ok(true)
+    Ok(())
 }
 
 /// Runs `sh -c script` as root, showing its output on stderr if `show`, and returns its exit code.
