@@ -1,4 +1,5 @@
 use boxq::Workspace;
+use boxq::claude_config::ClaudeConfig;
 use boxq::config::Config;
 use boxq::sandbox::Sandboxes;
 use clap::{Parser, Subcommand};
@@ -49,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(t) => {
             let ws = t.workspace()?;
             Config::from_process_env(&ws)?;
+            let claude_config = ClaudeConfig::from_process_env()?;
             let up = sandboxes.up(&ws, INTERIM_IMAGE).await?;
             let did = if up.created {
                 "Created"
@@ -56,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
                 "Reattached to"
             };
             eprintln!("{did} the Sandbox for {}", ws.path().display());
+            claude_config.sync(&ws, &up.target).await?;
         }
         Command::Shell(t) => {
             Config::from_process_env(&t.workspace()?)?;
