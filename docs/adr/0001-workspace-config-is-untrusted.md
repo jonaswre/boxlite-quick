@@ -4,7 +4,7 @@ A Workspace Config (`.boxq.toml`) arrives with whatever repo you clone, so boxq 
 
 - **Never allowed:** the base URL, the credentials and host-loopback access. A repo that could set the base URL would get the real API key injected into requests to its own server.
 - **Allowed with an Egress Approval:** Egress Policy additions, since they could open an exfiltration path. boxq asks before applying them, and asks again whenever they change.
-- **Allowed freely:** the image, setup hook and resources, because their effects stay inside the Sandbox.
+- **Allowed freely:** the image, Setup Hook and resources. A Setup Hook can write to the Workspace, but no more than the Agent already can, so it gets the same boundary: the Egress Policy.
 
 ## Considered Options
 

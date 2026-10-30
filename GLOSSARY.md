@@ -20,6 +20,14 @@ _Avoid_: Project, mount, volume
 The AI coding tool run inside a Sandbox, such as Claude Code.
 _Avoid_: Assistant, bot, model
 
+**Base Image**:
+The image boxq publishes and creates a Sandbox from unless a config names another.
+_Avoid_: Template, container image
+
+**Setup Hook**:
+A command a Global Config or Workspace Config gives to prepare a new Sandbox, run once when the Sandbox is created.
+_Avoid_: Init script, provisioning, postCreate
+
 **Egress Policy**:
 The rules deciding which outbound destinations a Sandbox may reach.
 _Avoid_: Firewall, allowlist, network policy
