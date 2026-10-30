@@ -43,7 +43,7 @@ fn by_default_the_policy_is_the_built_in_allowlist() {
 }
 
 #[test]
-fn turning_the_builtins_off_keeps_the_anthropic_entries() {
+fn turning_the_builtins_off_keeps_the_entries_the_agent_needs() {
     let egress = Egress {
         builtins: false,
         ..defaults()
@@ -51,7 +51,11 @@ fn turning_the_builtins_off_keeps_the_anthropic_entries() {
 
     let policy = Policy::new(&egress, None, false, no_dns).unwrap();
 
-    assert_eq!(allow_net(policy), ["api.anthropic.com"]);
+    // npm until the base image ships Claude Code preinstalled.
+    assert_eq!(
+        allow_net(policy),
+        ["api.anthropic.com", "registry.npmjs.org"]
+    );
 }
 
 #[test]
@@ -68,11 +72,20 @@ fn global_entries_always_apply_and_workspace_entries_only_with_an_approval() {
 
     assert_eq!(
         allow_net(unapproved),
-        ["*.mycorp.internal", "api.anthropic.com"]
+        [
+            "*.mycorp.internal",
+            "api.anthropic.com",
+            "registry.npmjs.org"
+        ]
     );
     assert_eq!(
         allow_net(approved),
-        ["*.mycorp.internal", "api.anthropic.com", "example.org"]
+        [
+            "*.mycorp.internal",
+            "api.anthropic.com",
+            "example.org",
+            "registry.npmjs.org",
+        ]
     );
 }
 
@@ -110,6 +123,7 @@ fn the_base_urls_host_and_its_resolved_ips_are_always_allowed() {
             "203.0.113.8",
             "api.anthropic.com",
             "cliproxy.example.net",
+            "registry.npmjs.org",
         ]
     );
 }
@@ -123,7 +137,10 @@ fn a_base_url_with_an_ip_host_allows_that_ip() {
 
     let policy = Policy::new(&egress, Some("http://10.0.0.5:8317"), false, no_dns).unwrap();
 
-    assert_eq!(allow_net(policy), ["10.0.0.5", "api.anthropic.com"]);
+    assert_eq!(
+        allow_net(policy),
+        ["10.0.0.5", "api.anthropic.com", "registry.npmjs.org"]
+    );
 }
 
 #[test]
@@ -158,6 +175,7 @@ fn an_allowed_hostname_in_tailnet_space_also_allows_its_ip() {
             "api.anthropic.com",
             "example.com",
             "nas.tailnet.ts.net",
+            "registry.npmjs.org",
         ]
     );
 }
@@ -175,7 +193,12 @@ fn an_approved_workspace_hostname_in_tailnet_space_also_allows_its_ip() {
 
     assert_eq!(
         allow_net(policy),
-        ["100.64.0.1", "api.anthropic.com", "git.tailnet.ts.net"]
+        [
+            "100.64.0.1",
+            "api.anthropic.com",
+            "git.tailnet.ts.net",
+            "registry.npmjs.org",
+        ]
     );
 }
 
@@ -205,8 +228,14 @@ fn a_base_url_on_host_loopback_does_not_open_it() {
     let by_name = Policy::new(&egress, Some("http://localhost:8317"), false, resolve).unwrap();
     let by_ip = Policy::new(&egress, Some("http://127.0.0.1:8317"), false, no_dns).unwrap();
 
-    assert_eq!(allow_net(by_name), ["api.anthropic.com", "localhost"]);
-    assert_eq!(allow_net(by_ip), ["api.anthropic.com"]);
+    assert_eq!(
+        allow_net(by_name),
+        ["api.anthropic.com", "localhost", "registry.npmjs.org"]
+    );
+    assert_eq!(
+        allow_net(by_ip),
+        ["api.anthropic.com", "registry.npmjs.org"]
+    );
 }
 
 /// A temporary state directory and two Workspaces.

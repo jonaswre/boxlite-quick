@@ -11,8 +11,9 @@ use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use url::{Host, Url};
 
-/// What the Agent needs whatever the Global Config says.
-const ANTHROPIC: &[&str] = &["api.anthropic.com"];
+/// What the Agent needs whatever the Global Config says. `registry.npmjs.org` serves the
+/// interim install of Claude Code (`crate::claude`), and goes once the base image ships it.
+const AGENT: &[&str] = &["api.anthropic.com", "registry.npmjs.org"];
 
 /// The forge and registries a Sandbox reaches unless the Global Config sets `builtins = false`.
 /// With its nonessential traffic off, Claude Code itself needs only `registry.npmjs.org` (`npx`
@@ -62,7 +63,7 @@ impl Policy {
         workspace_approved: bool,
         resolve: impl Fn(&str) -> Vec<Ipv4Addr>,
     ) -> anyhow::Result<Self> {
-        let mut allow_net: Vec<String> = ANTHROPIC.iter().map(|&e| e.into()).collect();
+        let mut allow_net: Vec<String> = AGENT.iter().map(|&e| e.into()).collect();
         if egress.builtins {
             allow_net.extend(BUILTINS.iter().map(|&e| e.into()));
         }
