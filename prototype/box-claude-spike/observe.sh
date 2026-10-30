@@ -13,7 +13,7 @@ hr() { printf '\n=== %s\n' "$*"; }
 hr "1. cold boot + setup (timings on stderr)"
 "$S" up "$WS" || { echo "up failed; if the error mentions bwrap/userns, retry with SPIKE_NO_JAILER=1"; exit 1; }
 
-hr "2. warm reattach (expect 'box found (reattach)' and 'setup: already done')"
+hr "2. warm reattach (expect 'box found (reattach)' and 'setup: already installed')"
 "$S" up "$WS"
 
 hr "3. key never enters the VM (expect the placeholder, not your key)"
@@ -24,9 +24,9 @@ x 'curl -sS -o /dev/null -w "%{http_code}\n" -m 20 -H "Authorization: Bearer $AN
 
 hr "5. egress: registry allowed, everything else blocked"
 x 'curl -sS -o /dev/null -w "npm %{http_code}\n" -m 15 https://registry.npmjs.org/ || echo "npm FAILED"'
-x 'curl -sS -o /dev/null -w "example.com %{http_code} (SHOULD NOT HAPPEN)\n" -m 10 https://example.com/ || echo "example.com blocked (good)"'
-x 'curl -sS -o /dev/null -w "api.github.com %{http_code} (SHOULD NOT HAPPEN)\n" -m 10 https://api.github.com/ || echo "api.github.com blocked (good)"'
-x 'curl -sS -o /dev/null -w "http example.com %{http_code} (SHOULD NOT HAPPEN)\n" -m 10 http://example.com/ || echo "http example.com blocked (good)"'
+for u in https://example.com/ https://api.github.com/ http://example.com/; do
+  x "curl -sS -o /dev/null -m 10 $u 2>/dev/null && echo '$u REACHABLE (bad)' || echo '$u blocked (good)'"
+done
 
 hr "6. Workspace edits land on the host with your ownership"
 x "echo from-box > '$WS/from-box.txt'; mkdir -p '$WS/box-dir'; touch '$WS/box-dir/f'; id"

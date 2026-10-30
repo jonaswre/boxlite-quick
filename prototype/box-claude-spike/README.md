@@ -10,14 +10,14 @@ What it does on `run`:
 3. Binds the Workspace read-write at the same path.
 4. Passes `ANTHROPIC_BASE_URL` through and sets `ANTHROPIC_AUTH_TOKEN=<BOXLITE_SECRET:anthropic>`. The real key goes only into `BoxOptions.secrets`, scoped to the base-URL host.
 5. Egress `allow_net` = base-URL host + its tailnet IP + `registry.npmjs.org`. Nothing else.
-6. Setup runs once (marker `/opt/boxq-setup-done`): `npm i -g @anthropic-ai/claude-code@2.1.312`, then seeds `/root/.claude.json` and `/root/.claude/settings.json` to skip the onboarding, trust and bypass prompts.
+6. Installs Claude once (marker `/opt/boxq-setup-done`): `npm i -g @anthropic-ai/claude-code@2.1.312`. On every attachment, atomically merges onboarding/trust and guest permission settings, including `disableAutoMode: "disable"`, while preserving unrelated configuration.
 7. `exec`s `claude --dangerously-skip-permissions` on a TTY as root, with `IS_SANDBOX=1`.
 
 Every step prints a `[spike +Ns]` timing to stderr.
 
 ## Run it
 
-Use a normal host shell. An agent sandbox with seccomp or no-new-privs won't work: image unpacking needs to create setgid files, and the jailer needs user namespaces.
+Image extraction must be allowed to preserve setuid/setgid mode bits. For a systemd-launched host process, set `RestrictSUIDSGID=false` and retain `NoNewPrivileges=true`. Also set `ProtectKernelTunables=false`: its masked proc mounts prevent bubblewrap from mounting the guest's private `/proc`. Keep the service non-root with an empty capability bounding set. Restart the parent service and start new agent processes after these changes; existing processes retain inherited restrictions.
 
 ```sh
 cd prototype/box-claude-spike
@@ -27,7 +27,7 @@ export ANTHROPIC_BASE_URL=https://cliproxyapi.<tailnet>.ts.net ANTHROPIC_AUTH_TO
 ./target/debug/box-claude-spike run PROTOTYPE-workspace   # the interactive session
 ```
 
-If boot fails with a bwrap or user-namespace error, this host has `kernel.apparmor_restrict_unprivileged_userns=1`. Either rerun with `SPIKE_NO_JAILER=1`, or run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. Note which one you used.
+On Ubuntu 24.04, install system `bubblewrap` and its specific AppArmor userns profile. The T3 hosts use `/etc/apparmor.d/boxlite-bwrap`, adapted from the pinned BoxLite SDK's generated profile for `/usr/bin/bwrap`. Keep `kernel.apparmor_restrict_unprivileged_userns=1` and the BoxLite jailer enabled. Verify as the unprivileged service user: `bwrap --ro-bind / / --unshare-user --unshare-pid --proc /proc true`. Run this under the service's effective hardening too; a normal terminal alone does not verify service compatibility.
 
 Other subcommands: `exec <path> -- cmd...`, `stop <path>`, `rm <path>`, `ls`.
 

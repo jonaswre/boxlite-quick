@@ -91,21 +91,42 @@ fn options(ws: &PathBuf) -> BoxOptions {
 }
 
 fn setup_script(ws: &PathBuf) -> String {
-    let ws = ws.to_string_lossy();
+    let ws = format!("'{}'", ws.to_string_lossy().replace('\'', "'\"'\"'"));
     format!(
         r#"set -e
-test -f /opt/boxq-setup-done && {{ echo "setup: already done"; exit 0; }}
-echo "setup: installing Claude Code {CLAUDE_VERSION} from npm"
-npm install -g --no-fund --no-audit @anthropic-ai/claude-code@{CLAUDE_VERSION}
+if ! test -f /opt/boxq-setup-done; then
+  echo "setup: installing Claude Code {CLAUDE_VERSION} from npm"
+  npm install -g --no-fund --no-audit @anthropic-ai/claude-code@{CLAUDE_VERSION}
+else
+  echo "setup: already installed"
+fi
 mkdir -p /root/.claude
-cat > /root/.claude.json <<'EOF'
-{{"hasCompletedOnboarding": true, "projects": {{"{ws}": {{"hasTrustDialogAccepted": true}}}}}}
-EOF
-cat > /root/.claude/settings.json <<'EOF'
-{{"skipDangerousModePermissionPrompt": true, "skipWebFetchPreflight": true, "permissions": {{"defaultMode": "bypassPermissions"}}}}
-EOF
+# Reconcile configuration on every attachment, preserving unrelated state.
+node - {ws} <<'NODE'
+const fs = require('fs');
+const workspace = process.argv[2];
+function update(path, apply) {{
+  const value = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, 'utf8')) : {{}};
+  apply(value);
+  const temporary = path + '.boxq-' + process.pid;
+  fs.writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', {{mode: 0o600}});
+  fs.renameSync(temporary, path);
+}}
+update('/root/.claude.json', c => {{
+  c.hasCompletedOnboarding = true;
+  c.projects ??= {{}};
+  c.projects[workspace] ??= {{}};
+  c.projects[workspace].hasTrustDialogAccepted = true;
+}});
+update('/root/.claude/settings.json', c => {{
+  c.disableAutoMode = 'disable';
+  c.skipDangerousModePermissionPrompt = true;
+  c.skipWebFetchPreflight = true;
+  c.permissions = {{...c.permissions, defaultMode: 'bypassPermissions'}};
+}});
+NODE
 touch /opt/boxq-setup-done
-echo "setup: done"
+echo "setup: configuration applied"
 "#
     )
 }
