@@ -34,6 +34,13 @@ impl Workspace {
         dirs
     }
 
+    /// The root of the main checkout this Workspace is a worktree of: the directory holding the
+    /// common `.git` it shares. `None` for anything else, a submodule included.
+    pub fn main_checkout(&self) -> Option<PathBuf> {
+        let git_dir = self.outside_git_dir()?;
+        (git_dir.file_name()? == ".git").then(|| git_dir.parent().unwrap().into())
+    }
+
     /// The common git directory a `.git` file points to, if it is outside the Workspace. A
     /// worktree's `.git` file points into its repo's `.git`, which `commondir` names; a
     /// submodule's points at its own. A `.git` file git can't follow on the host is ignored, so

@@ -10,6 +10,7 @@ use boxlite::BoxliteRuntime;
 use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
 use boxq::Workspace;
 use boxq::auth::Auth;
+use boxq::claude_config::ClaudeConfig;
 use boxq::config::Egress;
 use boxq::egress::Policy;
 use boxq::reap::reap_box;
@@ -596,7 +597,9 @@ async fn a_sandbox_reports_when_it_was_created_with_other_auth() {
     );
 }
 
-/// The Claude Code release the auth test installs, as the image will pin one.
+/// The Claude Code release the auth and Claude config tests install, as the image will pin one;
+/// prompts and their keys change between releases, so the Claude config test is what proves the
+/// seeded keys still skip them.
 const CLAUDE_CODE: &str = "@anthropic-ai/claude-code@2.1.312";
 
 /// Needs a real base URL and key, so it reads them from `BOXQ_TEST_BASE_URL` and
@@ -652,4 +655,204 @@ async fn claude_code_authenticates_through_the_placeholder() {
     assert_eq!(install.1, 0, "npm install failed");
     assert_eq!(asked.1, 0, "claude failed: {}", asked.0);
     assert!(asked.0.to_lowercase().contains("pong"), "{}", asked.0);
+}
+
+/// A host Claude config with a symlinked skill, settings and MCP servers, as `boxq run` copies it.
+fn host_claude_config(dir: &Path, ws: &Workspace) -> ClaudeConfig {
+    let skill = dir.join("dotfiles/review");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "# Review\n").unwrap();
+    std::fs::create_dir_all(dir.join(".claude/skills")).unwrap();
+    std::os::unix::fs::symlink(&skill, dir.join(".claude/skills/review")).unwrap();
+    std::fs::write(dir.join(".claude/.credentials.json"), "{}").unwrap();
+    std::fs::write(
+        dir.join(".claude/settings.json"),
+        r#"{"model": "opus", "env": {"ANTHROPIC_API_KEY": "sk-secret"}}"#,
+    )
+    .unwrap();
+    let claude_json = serde_json::json!({
+        "mcpServers": {"docs": {"command": "docs-mcp"}},
+        "oauthAccount": {"emailAddress": "me@example.com"},
+        "projects": {ws.path().to_str().unwrap(): {"mcpServers": {"db": {"command": "db-mcp"}}}},
+    });
+    std::fs::write(dir.join(".claude.json"), claude_json.to_string()).unwrap();
+    ClaudeConfig::new(&dir.join(".claude"), &dir.join(".claude.json"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn the_hosts_claude_config_merges_into_the_sandboxs_own() {
+    let mut f = Fixture::new();
+    let host = host_claude_config(&f.temp_dir(), &f.workspace);
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    sh(
+        &up.target,
+        r#"mkdir -p /root/.claude && echo '{"numStartups": 3}' > /root/.claude.json &&
+           echo '{"theme": "dark"}' > /root/.claude/settings.json"#,
+    )
+    .await
+    .unwrap();
+
+    host.sync(&f.workspace, &up.target).await.unwrap();
+
+    let ws = f.workspace.path().to_str().unwrap();
+    let read = |path: &'static str| {
+        let target = &up.target;
+        async move {
+            let (out, code) = sh(target, &format!("cat {path}")).await.unwrap();
+            assert_eq!(code, 0, "{path}");
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()
+        }
+    };
+    assert_eq!(
+        read("/root/.claude.json").await,
+        serde_json::json!({
+            "numStartups": 3,
+            "hasCompletedOnboarding": true,
+            "hasSeenAutoDefaultNudge": true,
+            "mcpServers": {"docs": {"command": "docs-mcp"}},
+            "projects": {ws: {
+                "mcpServers": {"db": {"command": "db-mcp"}},
+                "hasTrustDialogAccepted": true,
+            }},
+        })
+    );
+    assert_eq!(
+        read("/root/.claude/settings.json").await,
+        serde_json::json!({
+            "theme": "dark",
+            "model": "opus",
+            "skipDangerousModePermissionPrompt": true,
+            "permissions": {"defaultMode": "bypassPermissions"},
+        })
+    );
+    let listed = sh(
+        &up.target,
+        "cat /root/.claude/skills/review/SKILL.md && ls -A /root/.claude && \
+         stat -c %a /root/.claude.json",
+    )
+    .await
+    .unwrap();
+    assert_eq!(listed, ("# Review\nsettings.json\nskills\n600\n".into(), 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_sandbox_without_claude_config_gets_one() {
+    let mut f = Fixture::new();
+    let host = host_claude_config(&f.temp_dir(), &f.workspace);
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+
+    host.sync(&f.workspace, &up.target).await.unwrap();
+    host.sync(&f.workspace, &up.target).await.unwrap();
+
+    let ran = sh(
+        &up.target,
+        "grep -c hasTrustDialogAccepted /root/.claude.json && \
+         cat /root/.claude/skills/review/SKILL.md",
+    )
+    .await
+    .unwrap();
+    assert_eq!(ran, ("1\n# Review\n".into(), 0));
+}
+
+/// What Claude Code's TUI draws in `target`'s Sandbox in its first seconds after `input` is
+/// typed, escape codes and all.
+async fn claude_screen(target: &ExecTarget, ws: &Workspace, input: &str) -> String {
+    let token = CancellationToken::new();
+    let claude = target
+        .command("claude")
+        .arg("--dangerously-skip-permissions")
+        .env("IS_SANDBOX", "1")
+        .env("TERM", "xterm-256color")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
+        .env("ANTHROPIC_AUTH_TOKEN", "unused")
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .env("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1")
+        .working_dir(ws.path().to_str().unwrap())
+        .tty(true);
+    let mut exec = target
+        .session()
+        .execution()
+        .await
+        .unwrap()
+        .exec(claude, token.clone())
+        .await
+        .unwrap();
+    let stdin = exec.stdin_tx.take().unwrap();
+    let mut screen = String::new();
+    let mut typed = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while let Ok(Some(chunk)) = tokio::time::timeout_at(deadline, exec.stdout_rx.recv()).await {
+        screen.push_str(&chunk);
+        // Typed once the prompt is drawn, so the input lands in it.
+        if !typed && screen.contains("bypass permissions on") {
+            typed = true;
+            stdin.send(input.as_bytes().to_vec()).unwrap();
+        }
+    }
+    token.cancel();
+    screen
+}
+
+/// `screen` without its terminal escape sequences, which split highlighted text.
+fn plain(screen: &str) -> String {
+    let mut out = String::new();
+    let mut chars = screen.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {},
+            Some(']') => while chars.next().is_some_and(|c| c != '\x07') {},
+            _ => {}
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM and internet access"]
+async fn claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts() {
+    let mut f = Fixture::new();
+    let host = host_claude_config(&f.temp_dir(), &f.workspace);
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(NODE_IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let install = format!("npm install -g --no-fund --no-audit {CLAUDE_CODE} >/dev/null 2>&1");
+    assert_eq!(sh(&up.target, &install).await.unwrap().1, 0);
+
+    host.sync(&f.workspace, &up.target).await.unwrap();
+
+    let ws = f.workspace.path().display();
+    let (mcp, _) = sh(&up.target, &format!("cd {ws} && claude mcp list 2>&1"))
+        .await
+        .unwrap();
+    assert!(
+        mcp.contains("docs: docs-mcp") && mcp.contains("db: db-mcp"),
+        "{mcp}"
+    );
+    let screen = claude_screen(&up.target, &f.workspace, "/revi").await;
+    assert!(screen.contains("bypass permissions on"), "{screen}");
+    // The synced skill, offered as a user-scope command.
+    assert!(plain(&screen).contains("Review (user)"), "{screen}");
+    // The onboarding theme picker, the trust dialog, the bypass warning and the auto-mode offer.
+    for prompt in ["text style", "trust", "I accept", "auto mode"] {
+        assert!(
+            !screen.contains(prompt),
+            "prompted with {prompt:?}: {screen}"
+        );
+    }
 }

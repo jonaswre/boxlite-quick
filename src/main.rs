@@ -1,5 +1,6 @@
 use boxq::Workspace;
 use boxq::auth::Auth;
+use boxq::claude_config::ClaudeConfig;
 use boxq::config::Config;
 use boxq::egress::{Approvals, Policy};
 use boxq::sandbox::Sandboxes;
@@ -51,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
             let auth = Auth::from_config(&config)?;
             let spec = Spec::new(config.image.as_deref(), &config.resources)?;
             let egress = Policy::from_process_env(&ws, &config)?;
+            let claude_config = ClaudeConfig::from_process_env()?;
             let up = sandboxes.up(&ws, &spec, &egress, &auth).await?;
             let did = if up.created {
                 "Created"
@@ -72,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
                      which discards the Sandbox's state."
                 );
             }
+            claude_config.sync(&ws, &up.target).await?;
         }
         Command::Shell(t) => {
             let ws = t.workspace()?;

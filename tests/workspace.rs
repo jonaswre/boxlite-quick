@@ -194,3 +194,39 @@ fn a_git_file_pointing_nowhere_shares_only_the_workspace() {
 
     assert_eq!(ws.shared_dirs(), [ws.path().to_path_buf()]);
 }
+
+#[test]
+fn a_worktree_belongs_to_its_main_checkout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = repo(tmp.path());
+    git(&repo, &["worktree", "add", "-q", "../feature"]);
+
+    let ws = Workspace::resolve(&tmp.path().join("feature")).unwrap();
+
+    assert_eq!(
+        ws.main_checkout(),
+        Some(std::fs::canonicalize(&repo).unwrap())
+    );
+}
+
+/// A submodule's git dir lives in its superproject's `.git/modules`, not in a checkout's root.
+#[test]
+fn a_submodule_and_a_plain_repo_have_no_main_checkout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = repo(tmp.path());
+    let sup = tmp.path().join("super");
+    std::fs::create_dir(&sup).unwrap();
+    git(&sup, &["init", "-q"]);
+    git(
+        &sup,
+        &["submodule", "add", "-q", lib.to_str().unwrap(), "lib"],
+    );
+
+    let submodule = Workspace::resolve(&sup.join("lib")).unwrap();
+    let plain = Workspace::resolve(&lib).unwrap();
+
+    assert_eq!(
+        (submodule.main_checkout(), plain.main_checkout()),
+        (None, None)
+    );
+}
