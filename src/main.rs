@@ -1,12 +1,14 @@
 use boxq::Workspace;
+use boxq::auth::Auth;
+use boxq::claude;
+use boxq::claude_config::ClaudeConfig;
 use boxq::config::Config;
-use boxq::sandbox::Sandboxes;
+use boxq::egress::{Approvals, Policy};
+use boxq::sandbox::{NoSandbox, Sandboxes, Up};
+use boxq::session;
+use boxq::spec::{self, Spec};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-
-/// The image every Sandbox is created from, until the base image leaves the map's fog and the
-/// configured image is used (jonaswre/boxlite-quick#18).
-const INTERIM_IMAGE: &str = "node:22-bookworm";
 
 /// Run Claude Code against a Workspace inside an isolated Sandbox.
 #[derive(Parser)]
@@ -48,18 +50,18 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Run(t) => {
             let ws = t.workspace()?;
-            Config::from_process_env(&ws)?;
-            let up = sandboxes.up(&ws, INTERIM_IMAGE).await?;
-            let did = if up.created {
-                "Created"
-            } else {
-                "Reattached to"
-            };
-            eprintln!("{did} the Sandbox for {}", ws.path().display());
+            let claude_config = ClaudeConfig::from_process_env()?;
+            let sandbox = ready_sandbox(&sandboxes, &ws).await?;
+            claude::ensure_installed(&sandbox.target).await?;
+            claude_config.sync(&ws, &sandbox.target).await?;
+            let status = session::interactive(&sandbox.target, &ws, session::CLAUDE).await?;
+            std::process::exit(status);
         }
         Command::Shell(t) => {
-            Config::from_process_env(&t.workspace()?)?;
-            anyhow::bail!("`boxq shell` is not implemented yet");
+            let ws = t.workspace()?;
+            let sandbox = ready_sandbox(&sandboxes, &ws).await?;
+            let status = session::interactive(&sandbox.target, &ws, session::LOGIN_SHELL).await?;
+            std::process::exit(status);
         }
         Command::Ls => {
             for s in sandboxes.list().await? {
@@ -77,9 +79,51 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Rm(t) => {
             let ws = t.workspace()?;
-            sandboxes.rm(&ws).await?;
+            let removed = sandboxes.rm(&ws).await;
+            // Forgotten even if there is no Sandbox, so `rm` always resets the Workspace, but
+            // kept if removing the Sandbox failed, since it may still be there.
+            let gone = match &removed {
+                Ok(()) => true,
+                Err(e) => e.is::<NoSandbox>(),
+            };
+            if gone {
+                Approvals::from_process_env()?.revoke(&ws)?;
+            }
+            removed?;
             eprintln!("Removed the Sandbox for {}", ws.path().display());
         }
     }
     Ok(())
+}
+
+/// Creates the Workspace's Sandbox from the config, or reattaches to it, saying which and
+/// warning where the Sandbox no longer matches the config.
+async fn ready_sandbox(sandboxes: &Sandboxes, ws: &Workspace) -> anyhow::Result<Up> {
+    let config = Config::from_process_env(ws)?;
+    let auth = Auth::from_config(&config)?;
+    let spec = Spec::new(config.image.as_deref(), &config.resources)?;
+    let egress = Policy::from_process_env(ws, &config)?;
+    let up = sandboxes.up(ws, &spec, &egress, &auth).await?;
+    let action = if up.created {
+        "Created"
+    } else {
+        "Reattached to"
+    };
+    eprintln!("{action} the Sandbox for {}", ws.path().display());
+    let warning = up
+        .as_created
+        .as_ref()
+        .and_then(|c| spec.mismatch_warning(c, ws.path()));
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    if up.auth_changed {
+        eprintln!(
+            "The Sandbox for {} still has the base URL and API key it was created with; to \
+             use the current ones, {}.",
+            ws.path().display(),
+            spec::recreate_hint(ws.path())
+        );
+    }
+    Ok(up)
 }

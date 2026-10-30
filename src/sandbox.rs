@@ -2,14 +2,21 @@
 //! (jonaswre/boxlite-quick#10).
 
 use crate::Workspace;
+use crate::auth::Auth;
+use crate::config::read_or_default;
+use crate::egress::Policy;
 use crate::reap::reap_box;
 use crate::runtime;
+use crate::spec::Spec;
 use anyhow::Context;
-use boxlite::runtime::options::{BoxOptions, RootfsSpec, VolumeSpec};
+use boxlite::runtime::options::{
+    BoxOptions, NetworkMode, NetworkSpec, OutboundNetworkConfig, RootfsSpec, VolumeSpec,
+};
 use boxlite::{BoxCommand, BoxStatus, GuestSession};
 use boxlite_shared::BoxTransport;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 /// Every Sandbox under one boxq home.
 pub struct Sandboxes {
@@ -21,6 +28,12 @@ pub struct Up {
     /// Whether `up` created the Sandbox, rather than reattaching to it.
     pub created: bool,
     pub target: ExecTarget,
+    /// What the Sandbox was created from, or `None` if boxq has no record of it.
+    pub as_created: Option<Spec>,
+    /// Whether the Sandbox was created with another base URL or API key; `false` if boxq has no
+    /// record of which. A Box's secrets and env are fixed at creation, so it keeps those until it
+    /// is removed and created afresh.
+    pub auth_changed: bool,
 }
 
 /// One Sandbox as `list` reports it.
@@ -32,10 +45,28 @@ pub struct Listed {
     pub running: bool,
 }
 
+/// The error for a Workspace that has no Sandbox to stop or remove.
+#[derive(Debug)]
+pub struct NoSandbox(PathBuf);
+
+impl std::fmt::Display for NoSandbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} has no Sandbox", self.0.display())
+    }
+}
+
+impl std::error::Error for NoSandbox {}
+
 /// What boxq keeps about a Sandbox that its Box can't carry.
 #[derive(Serialize, Deserialize)]
 struct Record {
     workspace: PathBuf,
+    /// `None` for a Box created before boxq recorded its Spec, or whose record was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_created: Option<Spec>,
+    /// [`Auth::fingerprint`] of what the Sandbox was created with; `None` like `as_created`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth: Option<String>,
 }
 
 /// What a command needs to run in a Sandbox with no runtime open: the Box's own socket, and the
@@ -61,6 +92,59 @@ impl ExecTarget {
                 format!("container={}", self.container_id),
             )
             .working_dir("/")
+    }
+}
+
+/// A Sandbox command's stdout and stderr, read as one sequence of chunks in arrival order.
+pub(crate) struct OutputChunks {
+    stdout: UnboundedReceiver<String>,
+    stderr: UnboundedReceiver<String>,
+    stdout_open: bool,
+    stderr_open: bool,
+}
+
+/// What [`OutputChunks`] reads: some of stdout or of stderr.
+pub(crate) enum Chunk {
+    Stdout(String),
+    Stderr(String),
+}
+
+impl Chunk {
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::Stdout(text) | Self::Stderr(text) => text,
+        }
+    }
+}
+
+impl OutputChunks {
+    pub(crate) fn new(
+        stdout: UnboundedReceiver<String>,
+        stderr: UnboundedReceiver<String>,
+    ) -> Self {
+        Self {
+            stdout,
+            stderr,
+            stdout_open: true,
+            stderr_open: true,
+        }
+    }
+
+    /// The next chunk from either stream, or `None` once both have closed.
+    pub(crate) async fn next(&mut self) -> Option<Chunk> {
+        while self.stdout_open || self.stderr_open {
+            let (chunk, from_stdout) = tokio::select! {
+                c = self.stdout.recv(), if self.stdout_open => (c, true),
+                c = self.stderr.recv(), if self.stderr_open => (c, false),
+            };
+            match chunk {
+                Some(text) if from_stdout => return Some(Chunk::Stdout(text)),
+                Some(text) => return Some(Chunk::Stderr(text)),
+                None if from_stdout => self.stdout_open = false,
+                None => self.stderr_open = false,
+            }
+        }
+        None
     }
 }
 
@@ -91,14 +175,34 @@ impl Sandboxes {
         self.home.join("boxlite")
     }
 
-    /// Creates the Workspace's Sandbox from `image`, or reattaches to the one it has, and makes
-    /// sure it runs.
-    pub async fn up(&self, ws: &Workspace, image: &str) -> anyhow::Result<Up> {
-        // The record goes first, so a Box never exists without one.
-        self.write_record(ws)?;
+    /// Creates the Workspace's Sandbox from `spec` with `auth`, or reattaches to the one it has,
+    /// and makes sure it runs under `egress`. A Sandbox keeps the Spec and auth it was created
+    /// with.
+    pub async fn up(
+        &self,
+        ws: &Workspace,
+        spec: &Spec,
+        egress: &Policy,
+        auth: &Auth,
+    ) -> anyhow::Result<Up> {
         let rt = runtime::open(&self.boxlite_home())?;
-        let options = BoxOptions {
-            rootfs: RootfsSpec::Image(image.into()),
+        // The runtime's lock keeps the Box from appearing or vanishing until it is created.
+        let (as_created, created_auth) = match rt.get_info(&ws.box_name()).await? {
+            Some(_) => self
+                .read_record(&ws.box_name())?
+                .map_or((None, None), |r| (r.as_created, r.auth)),
+            None => (Some(spec.clone()), Some(auth.fingerprint())),
+        };
+        let auth_changed = created_auth
+            .as_ref()
+            .is_some_and(|created| *created != auth.fingerprint());
+        // The record goes first, so a Box never exists without one.
+        self.write_record(ws, as_created.clone(), created_auth)?;
+        let mut options = BoxOptions {
+            rootfs: RootfsSpec::Image(spec.image.clone()),
+            cpus: spec.cpus,
+            memory_mib: spec.memory_mib,
+            disk_size_gb: spec.disk_gib,
             entrypoint: Some(vec![]),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             // Fixed once the Box exists, so a Sandbox keeps the binds it was created with.
@@ -110,16 +214,28 @@ impl Sandboxes {
                     VolumeSpec::bind_mount(dir.clone(), dir)
                 })
                 .collect(),
+            // So a new Box never boots with the full access an unset policy means.
+            network: NetworkSpec::Enabled {
+                allow_net: egress.allow_net().to_vec(),
+            },
             auto_delete: Some(0),
             detach: true,
             ..Default::default()
         };
+        auth.apply(&mut options);
         let (b, created) = rt.get_or_create(options, Some(ws.box_name())).await?;
         if b.info().await?.status != BoxStatus::Running {
             // A VM leaked by an earlier stop must never share the disk with this one.
             reap_box(&self.boxlite_home(), b.id().as_ref())?;
             b.start().await?;
         }
+        // The Global Config or an Egress Approval may have changed since the Box was created.
+        b.network()
+            .update_outbound(OutboundNetworkConfig {
+                mode: NetworkMode::Enabled,
+                allow_net: egress.allow_net().to_vec(),
+            })
+            .await?;
         let box_dir = self.boxlite_home().join("boxes").join(b.id().as_ref());
         Ok(Up {
             created,
@@ -127,6 +243,8 @@ impl Sandboxes {
                 socket: box_dir.join("sockets/box.sock"),
                 container_id: container_id(&box_dir)?,
             },
+            as_created,
+            auth_changed,
         })
     }
 
@@ -134,7 +252,7 @@ impl Sandboxes {
     pub async fn stop(&self, ws: &Workspace) -> anyhow::Result<()> {
         let rt = runtime::open(&self.boxlite_home())?;
         let Some(b) = rt.get(&ws.box_name()).await? else {
-            anyhow::bail!("{} has no Sandbox", ws.path().display());
+            return Err(NoSandbox(ws.path().into()).into());
         };
         if b.info().await?.status == BoxStatus::Running {
             b.stop().await?;
@@ -146,7 +264,7 @@ impl Sandboxes {
     pub async fn rm(&self, ws: &Workspace) -> anyhow::Result<()> {
         let rt = runtime::open(&self.boxlite_home())?;
         let Some(info) = rt.get_info(&ws.box_name()).await? else {
-            anyhow::bail!("{} has no Sandbox", ws.path().display());
+            return Err(NoSandbox(ws.path().into()).into());
         };
         rt.remove(&ws.box_name(), true).await?;
         reap_box(&self.boxlite_home(), info.id.as_ref())?;
@@ -185,10 +303,17 @@ impl Sandboxes {
         self.home.join("sandboxes").join(format!("{box_name}.toml"))
     }
 
-    fn write_record(&self, ws: &Workspace) -> anyhow::Result<()> {
+    fn write_record(
+        &self,
+        ws: &Workspace,
+        as_created: Option<Spec>,
+        auth: Option<String>,
+    ) -> anyhow::Result<()> {
         let path = self.record_path(&ws.box_name());
         let record = Record {
             workspace: ws.path().into(),
+            as_created,
+            auth,
         };
         let toml = toml::to_string(&record)
             .with_context(|| format!("cannot record Workspace {}", ws.path().display()))?;
@@ -201,14 +326,7 @@ impl Sandboxes {
     }
 
     fn read_record(&self, box_name: &str) -> anyhow::Result<Option<Record>> {
-        let path = self.record_path(box_name);
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Ok(Some(
-                toml::from_str(&s).with_context(|| format!("invalid {}", path.display()))?,
-            )),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
-        }
+        read_or_default(&self.record_path(box_name), |s| toml::from_str(s).map(Some))
     }
 }
 

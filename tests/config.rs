@@ -1,5 +1,5 @@
 use boxq::Workspace;
-use boxq::config::Config;
+use boxq::config::{BaseUrl, Config};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -90,7 +90,7 @@ fn the_global_config_is_read_from_the_home_config_dir() {
     let config = host.load().unwrap();
 
     assert_eq!(
-        config.base_url.as_deref(),
+        config.base_url.as_ref().map(BaseUrl::as_str),
         Some("https://cliproxy.tailnet.ts.net")
     );
     assert_eq!(config.image.as_deref(), Some("ghcr.io/jonaswre/boxq:1"));
@@ -185,7 +185,10 @@ fn boxq_env_vars_override_the_files() {
 
     let config = host.load().unwrap();
 
-    assert_eq!(config.base_url.as_deref(), Some("https://from-env"));
+    assert_eq!(
+        config.base_url.as_ref().map(BaseUrl::as_str),
+        Some("https://from-env")
+    );
     assert_eq!(config.api_key.unwrap().expose(), "sk-from-env");
 }
 
@@ -353,6 +356,57 @@ fn allow_entries_outside_boxlites_grammar_are_errors_naming_file_and_entry() {
     }
 }
 
+const OPENS_HOST_LOOPBACK: [&str; 5] = [
+    "192.168.127.254",
+    "192.168.0.0/16",
+    "127.0.0.1",
+    "127.0.0.0/8",
+    "0.0.0.0/0",
+];
+
+#[test]
+fn a_workspace_allow_entry_that_would_open_host_loopback_is_an_error() {
+    for entry in OPENS_HOST_LOOPBACK {
+        let host = Host::new();
+        host.write_global("[egress]\nallow_host_loopback = true");
+        let path = host.write_workspace(&format!("[egress]\nallow = [{entry:?}]"));
+
+        let err = format!("{:#}", host.load().unwrap_err());
+
+        assert!(err.contains(&*path.to_string_lossy()), "{entry}: {err}");
+        assert!(err.contains(&format!("{entry:?}")), "{entry}: {err}");
+        assert!(err.contains("host loopback"), "{entry}: {err}");
+    }
+}
+
+#[test]
+fn a_global_allow_entry_may_open_host_loopback_only_with_allow_host_loopback() {
+    for entry in OPENS_HOST_LOOPBACK {
+        let host = Host::new();
+        host.write_global(&format!("[egress]\nallow = [{entry:?}]"));
+        let err = format!("{:#}", host.load().unwrap_err());
+        assert!(err.contains("config.toml"), "{entry}: {err}");
+        assert!(err.contains("allow_host_loopback = true"), "{entry}: {err}");
+
+        host.write_global(&format!(
+            "[egress]\nallow = [{entry:?}]\nallow_host_loopback = true"
+        ));
+        assert!(host.load().is_ok(), "{entry}");
+    }
+}
+
+#[test]
+fn allow_entries_beside_host_loopback_are_accepted() {
+    let host = Host::new();
+    host.write_global(
+        r#"[egress]
+allow = ["192.168.127.253", "192.168.128.0/17", "0.0.0.0/2", "localhost"]"#,
+    );
+    host.write_workspace("[egress]\nallow = [\"10.0.0.0/8\"]");
+
+    assert!(host.load().is_ok());
+}
+
 #[test]
 fn global_allow_entries_are_validated_too() {
     let host = Host::new();
@@ -434,4 +488,88 @@ fn zero_cpus_is_an_error() {
     let err = format!("{:#}", host.load().unwrap_err());
 
     assert!(err.contains("cpus"), "{err}");
+}
+
+#[test]
+fn an_invalid_base_url_is_an_error() {
+    let mut host = Host::new();
+    host.env
+        .insert("BOXQ_BASE_URL", "http://cliproxy.lan".into());
+
+    let err = host.load().unwrap_err();
+
+    assert!(
+        err.to_string().contains("must start with https://"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_base_url_names_its_host_lowercased() {
+    let url = BaseUrl::parse("https://CliProxy.Tailnet.ts.net/api").unwrap();
+
+    assert_eq!(url.as_str(), "https://CliProxy.Tailnet.ts.net/api");
+    assert_eq!(url.host(), "cliproxy.tailnet.ts.net");
+    assert_eq!(url.ipv4(), None);
+    assert_eq!(
+        BaseUrl::parse("https://10.0.0.5/").unwrap().ipv4(),
+        Some([10, 0, 0, 5].into())
+    );
+}
+
+#[test]
+fn a_base_url_that_is_not_https_is_refused() {
+    for url in ["http://cliproxy.lan", "cliproxy.lan", "ftp://cliproxy.lan"] {
+        let err = BaseUrl::parse(url).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "base URL {url:?} must start with https://: \
+                 boxq can inject the API key only into HTTPS requests"
+            )
+        );
+    }
+}
+
+#[test]
+fn a_base_url_with_a_port_is_refused() {
+    for url in ["https://cliproxy.lan:8317", "https://cliproxy.lan:443/v1"] {
+        let err = BaseUrl::parse(url).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "base URL {url:?} must not name a port: \
+                 boxq can inject the API key only on HTTPS's default port"
+            )
+        );
+    }
+}
+
+#[test]
+fn a_base_url_must_name_a_plain_host() {
+    for url in [
+        "https://",
+        "https:///v1",
+        "https://[fd7a::1]/",
+        "https://bad host/",
+    ] {
+        let err = BaseUrl::parse(url).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!("base URL {url:?} must name a hostname or IPv4 address")
+        );
+    }
+}
+
+#[test]
+fn a_base_url_carrying_credentials_is_refused_without_echoing_them() {
+    let err = BaseUrl::parse("https://user:hunter2@cliproxy.lan/").unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "the base URL must not carry credentials: put the API key in boxq's credentials file"
+    );
 }

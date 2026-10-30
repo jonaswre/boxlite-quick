@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 /// The merged, validated settings for one Workspace.
 #[derive(Debug)]
 pub struct Config {
-    pub base_url: Option<String>,
+    pub base_url: Option<BaseUrl>,
     pub api_key: Option<ApiKey>,
     pub image: Option<String>,
     pub setup: Option<String>,
@@ -83,6 +83,68 @@ pub struct Egress {
     pub workspace_allow: Vec<String>,
 }
 
+/// The base URL the Agent's API requests go to. Only `https://` on the default port, naming a
+/// hostname or IPv4 address and carrying no credentials, is one BoxLite can inject the API key
+/// into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseUrl {
+    url: String,
+    host: String,
+}
+
+impl BaseUrl {
+    pub fn parse(url: &str) -> anyhow::Result<Self> {
+        let Some(rest) = url.strip_prefix("https://") else {
+            anyhow::bail!(
+                "base URL {url:?} must start with https://: \
+                 boxq can inject the API key only into HTTPS requests"
+            );
+        };
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        // Not echoed, since the URL would print the credentials.
+        anyhow::ensure!(
+            !authority.contains('@'),
+            "the base URL must not carry credentials: put the API key in boxq's credentials file"
+        );
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        anyhow::ensure!(
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'),
+            "base URL {url:?} must name a hostname or IPv4 address"
+        );
+        // BoxLite 0.11 injects secrets only on port 443, and how to reach any other port is
+        // still undecided (the map's "Plain-HTTP or non-443 base URLs").
+        anyhow::ensure!(
+            port.is_none(),
+            "base URL {url:?} must not name a port: \
+             boxq can inject the API key only on HTTPS's default port"
+        );
+        Ok(Self {
+            url: url.into(),
+            host: host.to_ascii_lowercase(),
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.url
+    }
+
+    /// The hostname or IPv4 address, lowercased.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// The host's IPv4 address, if it names one rather than a hostname.
+    pub fn ipv4(&self) -> Option<Ipv4Addr> {
+        self.host.parse().ok()
+    }
+}
+
 /// The API key. Its `Debug` output is redacted so it never lands in a log.
 pub struct ApiKey(String);
 
@@ -110,7 +172,8 @@ impl Config {
         env: impl Fn(&str) -> Option<String>,
     ) -> anyhow::Result<Self> {
         let dir = config_dir(&env)?;
-        let global = File::read(&dir.join("config.toml"))?;
+        let global_path = dir.join("config.toml");
+        let global = File::read(&global_path)?;
         let credentials = read_credentials(&dir.join("credentials"))?;
         let ws_path = workspace.path().join(".boxq.toml");
         let ws = File::read(&ws_path)?;
@@ -121,9 +184,34 @@ impl Config {
             );
         }
         let egress = global.egress.unwrap_or_default();
+        let allow = egress.allow.unwrap_or_default();
+        let allow_host_loopback = egress.allow_host_loopback.unwrap_or(false);
+        let workspace_allow = ws.egress.and_then(|e| e.allow).unwrap_or_default();
+        if let Some(entry) = workspace_allow
+            .iter()
+            .find(|e| entry_opens_host_loopback(e))
+        {
+            anyhow::bail!(
+                "invalid {}: allow entry {entry:?} would open host loopback, which only the \
+                 Global Config's `allow_host_loopback` can",
+                ws_path.display()
+            );
+        }
+        if let Some(entry) = allow.iter().find(|e| entry_opens_host_loopback(e))
+            && !allow_host_loopback
+        {
+            anyhow::bail!(
+                "invalid {}: allow entry {entry:?} would open host loopback; set \
+                 `allow_host_loopback = true` to allow that",
+                global_path.display()
+            );
+        }
         Ok(Self {
             // The host's ANTHROPIC_* vars are deliberately never read.
-            base_url: env("BOXQ_BASE_URL").or(global.base_url),
+            base_url: env("BOXQ_BASE_URL")
+                .or(global.base_url)
+                .map(|url| BaseUrl::parse(&url))
+                .transpose()?,
             api_key: env("BOXQ_API_KEY").or(credentials.api_key).map(ApiKey),
             image: ws.image.or(global.image),
             setup: ws.setup.or(global.setup),
@@ -133,9 +221,9 @@ impl Config {
                 .or(global.resources.unwrap_or_default()),
             egress: Egress {
                 builtins: egress.builtins.unwrap_or(true),
-                allow: egress.allow.unwrap_or_default(),
-                allow_host_loopback: egress.allow_host_loopback.unwrap_or(false),
-                workspace_allow: ws.egress.and_then(|e| e.allow).unwrap_or_default(),
+                allow,
+                allow_host_loopback,
+                workspace_allow,
             },
         })
     }
@@ -213,13 +301,53 @@ fn is_allow_entry(entry: &str) -> bool {
         })
 }
 
+/// The guest's address for the host's 127.0.0.1 (`host.boxlite.internal`).
+pub(crate) const HOST_LOOPBACK: Ipv4Addr = Ipv4Addr::new(192, 168, 127, 254);
+
+/// Whether the IP or CIDR rule `entry` would open host loopback. Hostnames never do: BoxLite
+/// refuses a name that resolves to loopback unless an IP rule covers it.
+fn entry_opens_host_loopback(entry: &str) -> bool {
+    let (ip, prefix) = entry.split_once('/').unwrap_or((entry, "32"));
+    match (ip.parse(), prefix.parse()) {
+        (Ok(ip), Ok(prefix)) => opens_host_loopback(ip, prefix),
+        _ => false,
+    }
+}
+
+/// Whether an IP rule for `ip/prefix` would open host loopback: it covers [`HOST_LOOPBACK`], or
+/// overlaps 127.0.0.0/8, which a hostname rule that resolves there would then reach.
+pub(crate) fn opens_host_loopback(ip: Ipv4Addr, prefix: u8) -> bool {
+    let overlaps = |net: Ipv4Addr, bits: u8| {
+        let bits = prefix.min(bits);
+        let mask = u32::MAX.checked_shl(32 - u32::from(bits)).unwrap_or(0);
+        u32::from(ip) & mask == u32::from(net) & mask
+    };
+    overlaps(HOST_LOOPBACK, 32) || overlaps(Ipv4Addr::LOCALHOST, 8)
+}
+
 /// `$XDG_CONFIG_HOME/boxq`, falling back to `~/.config/boxq`.
 fn config_dir(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
-    let base = match env("XDG_CONFIG_HOME").filter(|dir| Path::new(dir).is_absolute()) {
+    xdg_dir(env, "XDG_CONFIG_HOME", ".config", "config")
+}
+
+/// `$XDG_STATE_HOME/boxq`, falling back to `~/.local/state/boxq`.
+pub(crate) fn state_dir(env: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
+    xdg_dir(env, "XDG_STATE_HOME", ".local/state", "state")
+}
+
+/// `${var}/boxq`, falling back to `~/{fallback}/boxq`; `what` names boxq's use of it.
+fn xdg_dir(
+    env: impl Fn(&str) -> Option<String>,
+    var: &str,
+    fallback: &str,
+    what: &str,
+) -> anyhow::Result<PathBuf> {
+    let base = match env(var).filter(|dir| Path::new(dir).is_absolute()) {
         Some(dir) => PathBuf::from(dir),
         None => {
-            let home = env("HOME").context("cannot find boxq's config: HOME is not set")?;
-            Path::new(&home).join(".config")
+            let home = env("HOME")
+                .with_context(|| format!("cannot find boxq's {what}: HOME is not set"))?;
+            Path::new(&home).join(fallback)
         }
     };
     Ok(base.join("boxq"))
@@ -268,10 +396,18 @@ fn read_credentials(path: &Path) -> anyhow::Result<Credentials> {
     })
 }
 
-/// Parse a config file, or return an empty one if it doesn't exist.
-fn read_file<T: Default + DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+/// Parse a TOML file, or return an empty one if it doesn't exist.
+pub(crate) fn read_file<T: Default + DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+    read_or_default(path, |text| toml::from_str(text))
+}
+
+/// Parse the file at `path` with `parse`, or return `T::default()` if it doesn't exist.
+pub(crate) fn read_or_default<T: Default, E: std::error::Error + Send + Sync + 'static>(
+    path: &Path,
+    parse: impl FnOnce(&str) -> Result<T, E>,
+) -> anyhow::Result<T> {
     match std::fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("invalid {}", path.display())),
+        Ok(text) => parse(&text).with_context(|| format!("invalid {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }

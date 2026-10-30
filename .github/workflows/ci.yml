@@ -38,4 +38,4 @@ jobs:
           test -r /dev/kvm && test -w /dev/kvm
       - name: Let BoxLite's bwrap jailer use user namespaces
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: cargo test --locked --test real_box -- --ignored
+      - run: cargo test --locked -- --ignored
