@@ -2,12 +2,9 @@ use boxq::Workspace;
 use boxq::config::Config;
 use boxq::egress::{Approvals, Policy};
 use boxq::sandbox::Sandboxes;
+use boxq::spec::Spec;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-
-/// The image every Sandbox is created from, until the base image leaves the map's fog and the
-/// configured image is used (jonaswre/boxlite-quick#18).
-const INTERIM_IMAGE: &str = "node:22-bookworm";
 
 /// Run Claude Code against a Workspace inside an isolated Sandbox.
 #[derive(Parser)]
@@ -50,14 +47,21 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(t) => {
             let ws = t.workspace()?;
             let config = Config::from_process_env(&ws)?;
+            let spec = Spec::new(config.image.as_deref(), &config.resources)?;
             let egress = Policy::from_process_env(&ws, &config)?;
-            let up = sandboxes.up(&ws, INTERIM_IMAGE, &egress).await?;
+            let up = sandboxes.up(&ws, &spec, &egress).await?;
             let did = if up.created {
                 "Created"
             } else {
                 "Reattached to"
             };
             eprintln!("{did} the Sandbox for {}", ws.path().display());
+            let warning = up
+                .as_created
+                .and_then(|c| spec.mismatch_warning(&c, ws.path()));
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
         }
         Command::Shell(t) => {
             let ws = t.workspace()?;

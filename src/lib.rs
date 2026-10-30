@@ -5,6 +5,7 @@ pub mod egress;
 pub mod reap;
 pub mod runtime;
 pub mod sandbox;
+pub mod spec;
 mod workspace;
 
 pub use workspace::Workspace;

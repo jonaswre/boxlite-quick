@@ -13,6 +13,7 @@ use boxq::config::Egress;
 use boxq::egress::Policy;
 use boxq::reap::reap_box;
 use boxq::sandbox::{ExecTarget, Listed, Sandboxes};
+use boxq::spec::Spec;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +22,16 @@ const IMAGE: &str = "alpine:3";
 
 /// Alpine with git, for the tests that run git in a Sandbox.
 const GIT_IMAGE: &str = "alpine/git:2.49.1";
+
+/// `image` with BoxLite's default resources.
+fn spec(image: &str) -> Spec {
+    Spec {
+        image: image.into(),
+        cpus: None,
+        memory_mib: None,
+        disk_gib: None,
+    }
+}
 
 /// A temporary boxq home with a temporary Workspace. Every Box in the home is removed on drop, so
 /// a failing test never leaves a VM running.
@@ -128,7 +139,7 @@ async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime
 
     let up = f
         .sandboxes
-        .up(&f.workspace, IMAGE, &default_policy())
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
     let held = f.runtime();
@@ -145,7 +156,7 @@ async fn a_stopped_sandbox_is_reattached_with_its_state() {
     let f = Fixture::new();
     let first = f
         .sandboxes
-        .up(&f.workspace, IMAGE, &default_policy())
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
     sh(&first.target, "echo kept > /root/state").await.unwrap();
@@ -153,7 +164,7 @@ async fn a_stopped_sandbox_is_reattached_with_its_state() {
     f.sandboxes.stop(&f.workspace).await.unwrap();
     let again = f
         .sandboxes
-        .up(&f.workspace, IMAGE, &default_policy())
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
 
@@ -171,13 +182,13 @@ async fn no_shim_survives_stop_or_rm() {
     let f = Fixture::new();
 
     f.sandboxes
-        .up(&f.workspace, IMAGE, &default_policy())
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
     f.sandboxes.stop(&f.workspace).await.unwrap();
     let after_stop = shims(&f.sandboxes.boxlite_home()).unwrap();
     f.sandboxes
-        .up(&f.workspace, IMAGE, &default_policy())
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
     f.sandboxes.rm(&f.workspace).await.unwrap();
@@ -208,7 +219,7 @@ async fn a_removed_sandbox_is_created_afresh() {
     let f = Fixture::new();
     let first = f
         .sandboxes
-        .up(&f.workspace, IMAGE, &default_policy())
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
     sh(&first.target, "echo gone > /root/state").await.unwrap();
@@ -216,7 +227,7 @@ async fn a_removed_sandbox_is_created_afresh() {
     f.sandboxes.rm(&f.workspace).await.unwrap();
     let again = f
         .sandboxes
-        .up(&f.workspace, IMAGE, &default_policy())
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
 
@@ -247,12 +258,12 @@ async fn sandboxes_are_listed_by_workspace_path() {
     let (a, b) = (f.another_workspace(), f.another_workspace());
     let (running, stopped) = if a.path() < b.path() { (a, b) } else { (b, a) };
     f.sandboxes
-        .up(&stopped, IMAGE, &default_policy())
+        .up(&stopped, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
     f.sandboxes.stop(&stopped).await.unwrap();
     f.sandboxes
-        .up(&running, IMAGE, &default_policy())
+        .up(&running, &spec(IMAGE), &default_policy())
         .await
         .unwrap();
     // A Box boxq has no record of, as if its record were lost.
@@ -295,7 +306,10 @@ async fn up_waits_for_a_runtime_another_process_holds() {
         drop(held);
     });
 
-    let up = f.sandboxes.up(&f.workspace, IMAGE, &default_policy()).await;
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await;
     release.join().unwrap();
 
     assert!(up.unwrap().created);
@@ -331,7 +345,7 @@ async fn git_works_in_a_worktrees_sandbox_as_on_the_host() {
 
     let up = f
         .sandboxes
-        .up(&worktree, GIT_IMAGE, &default_policy())
+        .up(&worktree, &spec(GIT_IMAGE), &default_policy())
         .await
         .unwrap();
     let script = format!(
@@ -353,6 +367,90 @@ async fn git_works_in_a_worktrees_sandbox_as_on_the_host() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_new_sandbox_gets_the_configured_image_and_resources() {
+    let f = Fixture::new();
+    let spec = Spec {
+        cpus: Some(2),
+        memory_mib: Some(768),
+        disk_gib: Some(3),
+        ..spec(GIT_IMAGE)
+    };
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec, &default_policy())
+        .await
+        .unwrap();
+    let (out, code) = sh(
+        &up.target,
+        "nproc; grep MemTotal /proc/meminfo | tr -dc 0-9; echo; df -k / | awk 'NR==2{print $2}'; \
+         git --version >/dev/null && echo has-git",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(code, 0, "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    let [cpus, mem_kib, disk_kib, git] = lines[..] else {
+        panic!("unexpected output: {out:?}");
+    };
+    let mib = |kib: &str| kib.parse::<u64>().unwrap() / 1024;
+    assert_eq!(cpus, "2");
+    // The guest kernel keeps some memory for itself.
+    assert!(
+        (640..=768).contains(&mib(mem_kib)),
+        "MemTotal {mem_kib} KiB"
+    );
+    assert!(
+        (2560..=3072).contains(&mib(disk_kib)),
+        "disk {disk_kib} KiB"
+    );
+    assert_eq!(git, "has-git");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_sandbox_keeps_the_spec_it_was_created_with_until_removed() {
+    let f = Fixture::new();
+    let first = spec(IMAGE);
+    let changed = Spec {
+        cpus: Some(2),
+        ..spec(IMAGE)
+    };
+
+    let created = f
+        .sandboxes
+        .up(&f.workspace, &first, &default_policy())
+        .await
+        .unwrap();
+    let running = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy())
+        .await
+        .unwrap();
+    f.sandboxes.stop(&f.workspace).await.unwrap();
+    let restarted = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy())
+        .await
+        .unwrap();
+    let (nproc, _) = sh(&restarted.target, "nproc").await.unwrap();
+    f.sandboxes.rm(&f.workspace).await.unwrap();
+    let recreated = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy())
+        .await
+        .unwrap();
+
+    assert_eq!(created.as_created, Some(first.clone()));
+    assert_eq!(running.as_created, Some(first.clone()));
+    assert_eq!(restarted.as_created, Some(first));
+    assert_eq!(nproc, "1\n");
+    assert_eq!(recreated.as_created, Some(changed));
+}
+
 /// Whether an HTTPS GET of `url` from the Sandbox succeeds.
 async fn reaches(target: &ExecTarget, url: &str) -> bool {
     let script = format!("wget -q -T 15 -O /dev/null {url}");
@@ -365,7 +463,11 @@ async fn listed_hosts_are_reachable_and_unlisted_ones_refused() {
     let f = Fixture::new();
     let policy = policy(&["example.com"], &["example.org"], false);
 
-    let up = f.sandboxes.up(&f.workspace, IMAGE, &policy).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &policy)
+        .await
+        .unwrap();
 
     assert!(
         reaches(&up.target, "https://example.com").await,
@@ -393,7 +495,7 @@ async fn a_running_sandbox_gets_the_policy_of_each_up() {
         .sandboxes
         .up(
             &f.workspace,
-            IMAGE,
+            &spec(IMAGE),
             &policy(&["example.com"], &["example.org"], false),
         )
         .await
@@ -402,7 +504,11 @@ async fn a_running_sandbox_gets_the_policy_of_each_up() {
 
     let again = f
         .sandboxes
-        .up(&f.workspace, IMAGE, &policy(&[], &["example.org"], true))
+        .up(
+            &f.workspace,
+            &spec(IMAGE),
+            &policy(&[], &["example.org"], true),
+        )
         .await
         .unwrap();
 

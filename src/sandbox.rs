@@ -5,6 +5,7 @@ use crate::Workspace;
 use crate::egress::Policy;
 use crate::reap::reap_box;
 use crate::runtime;
+use crate::spec::Spec;
 use anyhow::Context;
 use boxlite::runtime::options::{
     BoxOptions, NetworkMode, NetworkSpec, OutboundNetworkConfig, RootfsSpec, VolumeSpec,
@@ -24,6 +25,8 @@ pub struct Up {
     /// Whether `up` created the Sandbox, rather than reattaching to it.
     pub created: bool,
     pub target: ExecTarget,
+    /// What the Sandbox was created from, or `None` if boxq has no record of it.
+    pub as_created: Option<Spec>,
 }
 
 /// One Sandbox as `list` reports it.
@@ -39,6 +42,9 @@ pub struct Listed {
 #[derive(Serialize, Deserialize)]
 struct Record {
     workspace: PathBuf,
+    /// `None` for a Box created before boxq recorded its Spec, or whose record was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    as_created: Option<Spec>,
 }
 
 /// What a command needs to run in a Sandbox with no runtime open: the Box's own socket, and the
@@ -94,14 +100,22 @@ impl Sandboxes {
         self.home.join("boxlite")
     }
 
-    /// Creates the Workspace's Sandbox from `image`, or reattaches to the one it has, and makes
-    /// sure it runs under `egress`.
-    pub async fn up(&self, ws: &Workspace, image: &str, egress: &Policy) -> anyhow::Result<Up> {
-        // The record goes first, so a Box never exists without one.
-        self.write_record(ws)?;
+    /// Creates the Workspace's Sandbox from `spec`, or reattaches to the one it has, and makes
+    /// sure it runs under `egress`. A Sandbox keeps the Spec it was created from.
+    pub async fn up(&self, ws: &Workspace, spec: &Spec, egress: &Policy) -> anyhow::Result<Up> {
         let rt = runtime::open(&self.boxlite_home())?;
+        // The runtime's lock keeps the Box from appearing or vanishing until it is created.
+        let as_created = match rt.get_info(&ws.box_name()).await? {
+            Some(_) => self.read_record(&ws.box_name())?.and_then(|r| r.as_created),
+            None => Some(spec.clone()),
+        };
+        // The record goes first, so a Box never exists without one.
+        self.write_record(ws, as_created.clone())?;
         let options = BoxOptions {
-            rootfs: RootfsSpec::Image(image.into()),
+            rootfs: RootfsSpec::Image(spec.image.clone()),
+            cpus: spec.cpus,
+            memory_mib: spec.memory_mib,
+            disk_size_gb: spec.disk_gib,
             entrypoint: Some(vec![]),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             // Fixed once the Box exists, so a Sandbox keeps the binds it was created with.
@@ -141,6 +155,7 @@ impl Sandboxes {
                 socket: box_dir.join("sockets/box.sock"),
                 container_id: container_id(&box_dir)?,
             },
+            as_created,
         })
     }
 
@@ -199,10 +214,11 @@ impl Sandboxes {
         self.home.join("sandboxes").join(format!("{box_name}.toml"))
     }
 
-    fn write_record(&self, ws: &Workspace) -> anyhow::Result<()> {
+    fn write_record(&self, ws: &Workspace, as_created: Option<Spec>) -> anyhow::Result<()> {
         let path = self.record_path(&ws.box_name());
         let record = Record {
             workspace: ws.path().into(),
+            as_created,
         };
         let toml = toml::to_string(&record)
             .with_context(|| format!("cannot record Workspace {}", ws.path().display()))?;
