@@ -5,7 +5,7 @@
 //! drives the raw `ExecComponents` channels, because `Execution`'s constructor is `pub(crate)`.
 
 use crate::Workspace;
-use crate::sandbox::ExecTarget;
+use crate::sandbox::{ExecTarget, OutputChunks};
 use anyhow::Context;
 use rustix::termios::{OptionalActions, Termios, isatty, tcgetattr, tcgetwinsize, tcsetattr};
 use std::io::Read;
@@ -53,25 +53,11 @@ pub async fn interactive(
 
     let raw = RawMode::enable()?;
     // Guest stderr shares the TTY with stdout, so it all lands on boxq's stdout.
-    let mut output = exec.stdout_rx;
-    let mut errors = exec.stderr_rx;
+    let mut output = OutputChunks::new(exec.stdout_rx, exec.stderr_rx);
     let pump = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
-        let (mut out_open, mut err_open) = (true, true);
-        while out_open || err_open {
-            let (chunk, from_stdout) = tokio::select! {
-                c = output.recv(), if out_open => (c, true),
-                c = errors.recv(), if err_open => (c, false),
-            };
-            let Some(chunk) = chunk else {
-                if from_stdout {
-                    out_open = false;
-                } else {
-                    err_open = false;
-                }
-                continue;
-            };
-            if stdout.write_all(chunk.as_bytes()).await.is_err() {
+        while let Some(chunk) = output.next().await {
+            if stdout.write_all(chunk.text().as_bytes()).await.is_err() {
                 break;
             }
             let _ = stdout.flush().await;

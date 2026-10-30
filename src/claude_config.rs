@@ -7,7 +7,7 @@
 
 use crate::Workspace;
 use crate::config::read_or_default;
-use crate::sandbox::ExecTarget;
+use crate::sandbox::{Chunk, ExecTarget, OutputChunks};
 use anyhow::Context;
 use serde_json::{Map, Value};
 use std::os::unix::fs::PermissionsExt;
@@ -302,14 +302,14 @@ async fn run(target: &ExecTarget, argv: &[&str], stdin: Vec<u8>) -> anyhow::Resu
     {
         let _ = tx.send(stdin);
     }
-    let collect = |mut rx: tokio::sync::mpsc::UnboundedReceiver<String>| async move {
-        let mut out = String::new();
-        while let Some(chunk) = rx.recv().await {
-            out.push_str(&chunk);
+    let (mut stdout, mut stderr) = (String::new(), String::new());
+    let mut output = OutputChunks::new(exec.stdout_rx, exec.stderr_rx);
+    while let Some(chunk) = output.next().await {
+        match chunk {
+            Chunk::Stdout(text) => stdout.push_str(&text),
+            Chunk::Stderr(text) => stderr.push_str(&text),
         }
-        out
-    };
-    let (stdout, stderr) = tokio::join!(collect(exec.stdout_rx), collect(exec.stderr_rx));
+    }
     let result = exec
         .result_rx
         .recv()

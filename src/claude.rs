@@ -1,7 +1,7 @@
 //! Claude Code in the Sandbox. The interim image ships without it, so a Sandbox installs it on
 //! its first `run` and keeps it, until the base image leaves the map's fog with it preinstalled.
 
-use crate::sandbox::ExecTarget;
+use crate::sandbox::{ExecTarget, OutputChunks};
 use anyhow::Context;
 use tokio_util::sync::CancellationToken;
 
@@ -38,18 +38,10 @@ async fn run_as_root(target: &ExecTarget, script: &str, show: bool) -> anyhow::R
         .exec(command, token.clone())
         .await?;
     drop(exec.stdin_tx);
-    let (mut out, mut err) = (exec.stdout_rx, exec.stderr_rx);
-    let (mut out_open, mut err_open) = (true, true);
-    while out_open || err_open {
-        let (chunk, from_stdout) = tokio::select! {
-            c = out.recv(), if out_open => (c, true),
-            c = err.recv(), if err_open => (c, false),
-        };
-        match chunk {
-            Some(chunk) if show => eprint!("{chunk}"),
-            Some(_) => {}
-            None if from_stdout => out_open = false,
-            None => err_open = false,
+    let mut output = OutputChunks::new(exec.stdout_rx, exec.stderr_rx);
+    while let Some(chunk) = output.next().await {
+        if show {
+            eprint!("{}", chunk.text());
         }
     }
     let result = exec.result_rx.recv().await;

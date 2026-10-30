@@ -16,6 +16,7 @@ use boxlite::{BoxCommand, BoxStatus, GuestSession};
 use boxlite_shared::BoxTransport;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 /// Every Sandbox under one boxq home.
 pub struct Sandboxes {
@@ -91,6 +92,59 @@ impl ExecTarget {
                 format!("container={}", self.container_id),
             )
             .working_dir("/")
+    }
+}
+
+/// A Sandbox command's stdout and stderr, read as one sequence of chunks in arrival order.
+pub(crate) struct OutputChunks {
+    stdout: UnboundedReceiver<String>,
+    stderr: UnboundedReceiver<String>,
+    stdout_open: bool,
+    stderr_open: bool,
+}
+
+/// What [`OutputChunks`] reads: some of stdout or of stderr.
+pub(crate) enum Chunk {
+    Stdout(String),
+    Stderr(String),
+}
+
+impl Chunk {
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::Stdout(text) | Self::Stderr(text) => text,
+        }
+    }
+}
+
+impl OutputChunks {
+    pub(crate) fn new(
+        stdout: UnboundedReceiver<String>,
+        stderr: UnboundedReceiver<String>,
+    ) -> Self {
+        Self {
+            stdout,
+            stderr,
+            stdout_open: true,
+            stderr_open: true,
+        }
+    }
+
+    /// The next chunk from either stream, or `None` once both have closed.
+    pub(crate) async fn next(&mut self) -> Option<Chunk> {
+        while self.stdout_open || self.stderr_open {
+            let (chunk, from_stdout) = tokio::select! {
+                c = self.stdout.recv(), if self.stdout_open => (c, true),
+                c = self.stderr.recv(), if self.stderr_open => (c, false),
+            };
+            match chunk {
+                Some(text) if from_stdout => return Some(Chunk::Stdout(text)),
+                Some(text) => return Some(Chunk::Stderr(text)),
+                None if from_stdout => self.stdout_open = false,
+                None => self.stderr_open = false,
+            }
+        }
+        None
     }
 }
 
