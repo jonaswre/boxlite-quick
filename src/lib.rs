@@ -1,5 +1,6 @@
 //! boxq: run an Agent against a Workspace inside an isolated Sandbox.
 
+pub mod auth;
 pub mod config;
 pub mod egress;
 pub mod reap;

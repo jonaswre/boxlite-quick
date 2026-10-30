@@ -1,4 +1,5 @@
 use boxq::Workspace;
+use boxq::auth::Auth;
 use boxq::config::Config;
 use boxq::egress::{Approvals, Policy};
 use boxq::sandbox::Sandboxes;
@@ -47,9 +48,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(t) => {
             let ws = t.workspace()?;
             let config = Config::from_process_env(&ws)?;
+            let auth = Auth::from_config(&config)?;
             let spec = Spec::new(config.image.as_deref(), &config.resources)?;
             let egress = Policy::from_process_env(&ws, &config)?;
-            let up = sandboxes.up(&ws, &spec, &egress).await?;
+            let up = sandboxes.up(&ws, &spec, &egress, &auth).await?;
             let did = if up.created {
                 "Created"
             } else {
@@ -61,6 +63,14 @@ async fn main() -> anyhow::Result<()> {
                 .and_then(|c| spec.mismatch_warning(&c, ws.path()));
             if let Some(warning) = warning {
                 eprintln!("{warning}");
+            }
+            if up.auth_changed {
+                let ws = ws.path().display();
+                eprintln!(
+                    "The Sandbox for {ws} still has the base URL and API key it was created \
+                     with; to use the current ones, run `boxq rm {ws}` and then `boxq run {ws}`, \
+                     which discards the Sandbox's state."
+                );
             }
         }
         Command::Shell(t) => {

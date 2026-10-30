@@ -2,6 +2,7 @@
 //! (jonaswre/boxlite-quick#10).
 
 use crate::Workspace;
+use crate::auth::Auth;
 use crate::egress::Policy;
 use crate::reap::reap_box;
 use crate::runtime;
@@ -27,6 +28,10 @@ pub struct Up {
     pub target: ExecTarget,
     /// What the Sandbox was created from, or `None` if boxq has no record of it.
     pub as_created: Option<Spec>,
+    /// Whether the Sandbox was created with another base URL or API key, or boxq has no record
+    /// of which. A Box's secrets and env are fixed at creation, so it keeps those until it is
+    /// removed and created afresh.
+    pub auth_changed: bool,
 }
 
 /// One Sandbox as `list` reports it.
@@ -45,6 +50,9 @@ struct Record {
     /// `None` for a Box created before boxq recorded its Spec, or whose record was lost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     as_created: Option<Spec>,
+    /// [`Auth::fingerprint`] of what the Sandbox was created with; `None` like `as_created`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth: Option<String>,
 }
 
 /// What a command needs to run in a Sandbox with no runtime open: the Box's own socket, and the
@@ -100,18 +108,28 @@ impl Sandboxes {
         self.home.join("boxlite")
     }
 
-    /// Creates the Workspace's Sandbox from `spec`, or reattaches to the one it has, and makes
-    /// sure it runs under `egress`. A Sandbox keeps the Spec it was created from.
-    pub async fn up(&self, ws: &Workspace, spec: &Spec, egress: &Policy) -> anyhow::Result<Up> {
+    /// Creates the Workspace's Sandbox from `spec` with `auth`, or reattaches to the one it has,
+    /// and makes sure it runs under `egress`. A Sandbox keeps the Spec and auth it was created
+    /// with.
+    pub async fn up(
+        &self,
+        ws: &Workspace,
+        spec: &Spec,
+        egress: &Policy,
+        auth: &Auth,
+    ) -> anyhow::Result<Up> {
         let rt = runtime::open(&self.boxlite_home())?;
         // The runtime's lock keeps the Box from appearing or vanishing until it is created.
-        let as_created = match rt.get_info(&ws.box_name()).await? {
-            Some(_) => self.read_record(&ws.box_name())?.and_then(|r| r.as_created),
-            None => Some(spec.clone()),
+        let (as_created, created_auth) = match rt.get_info(&ws.box_name()).await? {
+            Some(_) => self
+                .read_record(&ws.box_name())?
+                .map_or((None, None), |r| (r.as_created, r.auth)),
+            None => (Some(spec.clone()), Some(auth.fingerprint())),
         };
+        let auth_changed = created_auth.as_deref() != Some(auth.fingerprint().as_str());
         // The record goes first, so a Box never exists without one.
-        self.write_record(ws, as_created.clone())?;
-        let options = BoxOptions {
+        self.write_record(ws, as_created.clone(), created_auth)?;
+        let mut options = BoxOptions {
             rootfs: RootfsSpec::Image(spec.image.clone()),
             cpus: spec.cpus,
             memory_mib: spec.memory_mib,
@@ -135,6 +153,7 @@ impl Sandboxes {
             detach: true,
             ..Default::default()
         };
+        auth.apply(&mut options);
         let (b, created) = rt.get_or_create(options, Some(ws.box_name())).await?;
         if b.info().await?.status != BoxStatus::Running {
             // A VM leaked by an earlier stop must never share the disk with this one.
@@ -156,6 +175,7 @@ impl Sandboxes {
                 container_id: container_id(&box_dir)?,
             },
             as_created,
+            auth_changed,
         })
     }
 
@@ -214,11 +234,17 @@ impl Sandboxes {
         self.home.join("sandboxes").join(format!("{box_name}.toml"))
     }
 
-    fn write_record(&self, ws: &Workspace, as_created: Option<Spec>) -> anyhow::Result<()> {
+    fn write_record(
+        &self,
+        ws: &Workspace,
+        as_created: Option<Spec>,
+        auth: Option<String>,
+    ) -> anyhow::Result<()> {
         let path = self.record_path(&ws.box_name());
         let record = Record {
             workspace: ws.path().into(),
             as_created,
+            auth,
         };
         let toml = toml::to_string(&record)
             .with_context(|| format!("cannot record Workspace {}", ws.path().display()))?;
