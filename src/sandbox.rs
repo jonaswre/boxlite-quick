@@ -2,11 +2,14 @@
 //! (jonaswre/boxlite-quick#10).
 
 use crate::Workspace;
+use crate::egress::Policy;
 use crate::reap::reap_box;
 use crate::runtime;
 use crate::spec::Spec;
 use anyhow::Context;
-use boxlite::runtime::options::{BoxOptions, RootfsSpec, VolumeSpec};
+use boxlite::runtime::options::{
+    BoxOptions, NetworkMode, NetworkSpec, OutboundNetworkConfig, RootfsSpec, VolumeSpec,
+};
 use boxlite::{BoxCommand, BoxStatus, GuestSession};
 use boxlite_shared::BoxTransport;
 use serde::{Deserialize, Serialize};
@@ -98,8 +101,8 @@ impl Sandboxes {
     }
 
     /// Creates the Workspace's Sandbox from `spec`, or reattaches to the one it has, and makes
-    /// sure it runs. A Sandbox keeps the Spec it was created from.
-    pub async fn up(&self, ws: &Workspace, spec: &Spec) -> anyhow::Result<Up> {
+    /// sure it runs under `egress`. A Sandbox keeps the Spec it was created from.
+    pub async fn up(&self, ws: &Workspace, spec: &Spec, egress: &Policy) -> anyhow::Result<Up> {
         let rt = runtime::open(&self.boxlite_home())?;
         // The runtime's lock keeps the Box from appearing or vanishing until it is created.
         let as_created = match rt.get_info(&ws.box_name()).await? {
@@ -124,6 +127,10 @@ impl Sandboxes {
                     VolumeSpec::bind_mount(dir.clone(), dir)
                 })
                 .collect(),
+            // So a new Box never boots with the full access an unset policy means.
+            network: NetworkSpec::Enabled {
+                allow_net: egress.allow_net().to_vec(),
+            },
             auto_delete: Some(0),
             detach: true,
             ..Default::default()
@@ -134,6 +141,13 @@ impl Sandboxes {
             reap_box(&self.boxlite_home(), b.id().as_ref())?;
             b.start().await?;
         }
+        // The Global Config or an Egress Approval may have changed since the Box was created.
+        b.network()
+            .update_outbound(OutboundNetworkConfig {
+                mode: NetworkMode::Enabled,
+                allow_net: egress.allow_net().to_vec(),
+            })
+            .await?;
         let box_dir = self.boxlite_home().join("boxes").join(b.id().as_ref());
         Ok(Up {
             created,

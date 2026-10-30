@@ -2,6 +2,7 @@
 //! into one validated [`Config`] (jonaswre/boxlite-quick#6, ADR 0001).
 
 use crate::Workspace;
+use crate::egress::entry_opens_host_loopback;
 use anyhow::Context;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -110,7 +111,8 @@ impl Config {
         env: impl Fn(&str) -> Option<String>,
     ) -> anyhow::Result<Self> {
         let dir = config_dir(&env)?;
-        let global = File::read(&dir.join("config.toml"))?;
+        let global_path = dir.join("config.toml");
+        let global = File::read(&global_path)?;
         let credentials = read_credentials(&dir.join("credentials"))?;
         let ws_path = workspace.path().join(".boxq.toml");
         let ws = File::read(&ws_path)?;
@@ -121,6 +123,28 @@ impl Config {
             );
         }
         let egress = global.egress.unwrap_or_default();
+        let allow = egress.allow.unwrap_or_default();
+        let allow_host_loopback = egress.allow_host_loopback.unwrap_or(false);
+        let workspace_allow = ws.egress.and_then(|e| e.allow).unwrap_or_default();
+        if let Some(entry) = workspace_allow
+            .iter()
+            .find(|e| entry_opens_host_loopback(e))
+        {
+            anyhow::bail!(
+                "invalid {}: allow entry {entry:?} would open host loopback, which only the \
+                 Global Config's `allow_host_loopback` can",
+                ws_path.display()
+            );
+        }
+        if let Some(entry) = allow.iter().find(|e| entry_opens_host_loopback(e))
+            && !allow_host_loopback
+        {
+            anyhow::bail!(
+                "invalid {}: allow entry {entry:?} would open host loopback; set \
+                 `allow_host_loopback = true` to allow that",
+                global_path.display()
+            );
+        }
         Ok(Self {
             // The host's ANTHROPIC_* vars are deliberately never read.
             base_url: env("BOXQ_BASE_URL").or(global.base_url),
@@ -133,9 +157,9 @@ impl Config {
                 .or(global.resources.unwrap_or_default()),
             egress: Egress {
                 builtins: egress.builtins.unwrap_or(true),
-                allow: egress.allow.unwrap_or_default(),
-                allow_host_loopback: egress.allow_host_loopback.unwrap_or(false),
-                workspace_allow: ws.egress.and_then(|e| e.allow).unwrap_or_default(),
+                allow,
+                allow_host_loopback,
+                workspace_allow,
             },
         })
     }
