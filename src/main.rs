@@ -1,9 +1,12 @@
 use boxq::Workspace;
 use boxq::auth::Auth;
+use boxq::claude;
 use boxq::claude_config::ClaudeConfig;
 use boxq::config::Config;
 use boxq::egress::{Approvals, Policy};
 use boxq::sandbox::Sandboxes;
+use boxq::sandbox::Up;
+use boxq::session;
 use boxq::spec::Spec;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -48,39 +51,18 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Run(t) => {
             let ws = t.workspace()?;
-            let config = Config::from_process_env(&ws)?;
-            let auth = Auth::from_config(&config)?;
-            let spec = Spec::new(config.image.as_deref(), &config.resources)?;
-            let egress = Policy::from_process_env(&ws, &config)?;
             let claude_config = ClaudeConfig::from_process_env()?;
-            let up = sandboxes.up(&ws, &spec, &egress, &auth).await?;
-            let did = if up.created {
-                "Created"
-            } else {
-                "Reattached to"
-            };
-            eprintln!("{did} the Sandbox for {}", ws.path().display());
-            let warning = up
-                .as_created
-                .and_then(|c| spec.mismatch_warning(&c, ws.path()));
-            if let Some(warning) = warning {
-                eprintln!("{warning}");
-            }
-            if up.auth_changed {
-                let ws = ws.path().display();
-                eprintln!(
-                    "The Sandbox for {ws} still has the base URL and API key it was created \
-                     with; to use the current ones, run `boxq rm {ws}` and then `boxq run {ws}`, \
-                     which discards the Sandbox's state."
-                );
-            }
+            let up = up(&sandboxes, &ws).await?;
+            claude::ensure_installed(&up.target).await?;
             claude_config.sync(&ws, &up.target).await?;
+            let status = session::interactive(&up.target, &ws, session::CLAUDE).await?;
+            std::process::exit(status);
         }
         Command::Shell(t) => {
             let ws = t.workspace()?;
-            let config = Config::from_process_env(&ws)?;
-            Policy::from_process_env(&ws, &config)?;
-            anyhow::bail!("`boxq shell` is not implemented yet");
+            let up = up(&sandboxes, &ws).await?;
+            let status = session::interactive(&up.target, &ws, session::LOGIN_SHELL).await?;
+            std::process::exit(status);
         }
         Command::Ls => {
             for s in sandboxes.list().await? {
@@ -105,4 +87,36 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Creates the Workspace's Sandbox from the config, or reattaches to it, saying which and
+/// warning where the Sandbox no longer matches the config.
+async fn up(sandboxes: &Sandboxes, ws: &Workspace) -> anyhow::Result<Up> {
+    let config = Config::from_process_env(ws)?;
+    let auth = Auth::from_config(&config)?;
+    let spec = Spec::new(config.image.as_deref(), &config.resources)?;
+    let egress = Policy::from_process_env(ws, &config)?;
+    let up = sandboxes.up(ws, &spec, &egress, &auth).await?;
+    let did = if up.created {
+        "Created"
+    } else {
+        "Reattached to"
+    };
+    eprintln!("{did} the Sandbox for {}", ws.path().display());
+    let warning = up
+        .as_created
+        .as_ref()
+        .and_then(|c| spec.mismatch_warning(c, ws.path()));
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    if up.auth_changed {
+        let ws = ws.path().display();
+        eprintln!(
+            "The Sandbox for {ws} still has the base URL and API key it was created \
+             with; to use the current ones, run `boxq rm {ws}` and then `boxq run {ws}`, \
+             which discards the Sandbox's state."
+        );
+    }
+    Ok(up)
 }

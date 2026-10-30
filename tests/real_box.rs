@@ -16,6 +16,7 @@ use boxq::egress::Policy;
 use boxq::reap::reap_box;
 use boxq::sandbox::{ExecTarget, Listed, Sandboxes};
 use boxq::spec::Spec;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -35,7 +36,7 @@ fn spec(image: &str) -> Spec {
     }
 }
 
-/// Node, for the test that installs Claude Code from npm.
+/// Node, for the tests that install Claude Code from npm.
 const NODE_IMAGE: &str = "node:22-bookworm";
 
 /// A key no test sends anywhere real, distinctive enough to grep a guest for.
@@ -597,11 +598,6 @@ async fn a_sandbox_reports_when_it_was_created_with_other_auth() {
     );
 }
 
-/// The Claude Code release the auth and Claude config tests install, as the image will pin one;
-/// prompts and their keys change between releases, so the Claude config test is what proves the
-/// seeded keys still skip them.
-const CLAUDE_CODE: &str = "@anthropic-ai/claude-code@2.1.312";
-
 /// Needs a real base URL and key, so it reads them from `BOXQ_TEST_BASE_URL` and
 /// `BOXQ_TEST_API_KEY` and passes vacuously without them, as in CI.
 #[tokio::test(flavor = "multi_thread")]
@@ -639,12 +635,7 @@ async fn claude_code_authenticates_through_the_placeholder() {
         .up(&f.workspace, &spec(NODE_IMAGE), &policy, &auth)
         .await
         .unwrap();
-    let install = sh(
-        &up.target,
-        &format!("npm install -g --no-fund --no-audit {CLAUDE_CODE} >&2"),
-    )
-    .await
-    .unwrap();
+    boxq::claude::ensure_installed(&up.target).await.unwrap();
     let asked = sh(
         &up.target,
         "claude -p 'Reply with the single word pong, in lower case.' 2>&1",
@@ -652,7 +643,6 @@ async fn claude_code_authenticates_through_the_placeholder() {
     .await
     .unwrap();
 
-    assert_eq!(install.1, 0, "npm install failed");
     assert_eq!(asked.1, 0, "claude failed: {}", asked.0);
     assert!(asked.0.to_lowercase().contains("pong"), "{}", asked.0);
 }
@@ -831,8 +821,9 @@ async fn claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts
         .up(&f.workspace, &spec(NODE_IMAGE), &default_policy(), &f.auth)
         .await
         .unwrap();
-    let install = format!("npm install -g --no-fund --no-audit {CLAUDE_CODE} >/dev/null 2>&1");
-    assert_eq!(sh(&up.target, &install).await.unwrap().1, 0);
+    // The release boxq installs: prompts and their keys change between releases, so this test is
+    // what proves the seeded keys still skip them.
+    boxq::claude::ensure_installed(&up.target).await.unwrap();
 
     host.sync(&f.workspace, &up.target).await.unwrap();
 
@@ -855,4 +846,272 @@ async fn claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts
             "prompted with {prompt:?}: {screen}"
         );
     }
+}
+
+/// A `boxq` process on its own pseudo-terminal, as a user's terminal runs it.
+struct Terminal {
+    master: std::fs::File,
+    child: std::process::Child,
+    output: std::sync::mpsc::Receiver<Vec<u8>>,
+    seen: String,
+}
+
+impl Terminal {
+    /// Runs `boxq args` against the fixture's home on a fresh 24x80 terminal.
+    fn boxq(f: &Fixture, args: &[&str]) -> Self {
+        use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+        use std::os::unix::process::CommandExt;
+
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+        grantpt(&master).unwrap();
+        unlockpt(&master).unwrap();
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(std::ffi::OsStr::from_bytes(
+                ptsname(&master, Vec::new()).unwrap().as_bytes(),
+            ))
+            .unwrap();
+        let master = std::fs::File::from(master);
+        set_size(&master, 24, 80);
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_boxq"));
+        cmd.args(args)
+            .env("BOXQ_HOME", f.sandboxes.boxlite_home().parent().unwrap())
+            .env("XDG_CONFIG_HOME", f.sandboxes.boxlite_home())
+            .env("XDG_STATE_HOME", f.sandboxes.boxlite_home())
+            .env("BOXQ_BASE_URL", "https://cliproxy.boxq.invalid")
+            .env("BOXQ_API_KEY", FAKE_KEY)
+            .env("TERM", "xterm-256color")
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave);
+        // The terminal becomes boxq's controlling terminal, so resizing it sends SIGWINCH.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        // The slave stays open only in boxq, so the reader sees EOF when boxq exits.
+        drop(cmd);
+        let (tx, output) = std::sync::mpsc::channel();
+        let mut reader = master.try_clone().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0; 4096];
+            while let Ok(n @ 1..) = reader.read(&mut buf) {
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            master,
+            child,
+            output,
+            seen: String::new(),
+        }
+    }
+
+    fn type_in(&mut self, keys: &str) {
+        use std::io::Write;
+        self.master.write_all(keys.as_bytes()).unwrap();
+    }
+
+    fn resize(&self, rows: u16, cols: u16) {
+        set_size(&self.master, rows, cols);
+    }
+
+    /// Waits for `text` in the terminal's output, panicking with what it saw after 60 s.
+    fn expect(&mut self, text: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !self.seen.contains(text) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.output.recv_timeout(left) {
+                Ok(chunk) => self.seen.push_str(&String::from_utf8_lossy(&chunk)),
+                Err(_) => panic!("no {text:?} on the terminal; it shows:\n{}", self.seen),
+            }
+        }
+        // Later expectations only look at what comes after.
+        let at = self.seen.find(text).unwrap() + text.len();
+        self.seen.drain(..at);
+    }
+
+    /// Waits for a login shell's prompt in `ws`: Alpine's `/etc/profile` sets it to `host:cwd# `.
+    fn expect_prompt(&mut self, ws: &Workspace) {
+        self.expect(&format!(":{}# ", ws.path().display()));
+    }
+
+    /// Waits for boxq to exit, returning its exit code.
+    fn exit_code(&mut self) -> i32 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status
+                    .code()
+                    .unwrap_or_else(|| panic!("boxq died: {status}"));
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "boxq did not exit; the terminal shows:\n{}",
+                self.seen
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+fn set_size(master: &std::fs::File, rows: u16, cols: u16) {
+    let size = rustix::termios::Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    rustix::termios::tcsetwinsize(master, size).unwrap();
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn shell_opens_a_root_shell_in_the_workspace_and_leaves_the_sandbox_running() {
+    let f = Fixture::new();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let ws = f.workspace.path().to_str().unwrap();
+
+    let mut t = Terminal::boxq(&f, &["shell", ws]);
+    t.expect_prompt(&f.workspace);
+    // Typed `$` is echoed as-is, so only the shell's own output matches.
+    t.type_in("echo \"at:$PWD:uid=$(id -u):$IS_SANDBOX:$TERM\"\r");
+    t.expect(&format!("at:{ws}:uid=0:1:xterm-256color"));
+    t.type_in("exit 3\r");
+
+    assert_eq!(t.exit_code(), 3);
+    let listed = f.sandboxes.list().await.unwrap();
+    assert!(listed[0].running, "the Sandbox stopped with the session");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_session_follows_its_terminals_size() {
+    let f = Fixture::new();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
+    t.expect_prompt(&f.workspace);
+    t.type_in("echo \"size:$(stty size)\"\r");
+    t.expect("size:24 80");
+
+    t.resize(40, 100);
+    // The resize and the typed command reach the guest on separate channels, so wait first.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    t.type_in("echo \"size:$(stty size)\"\r");
+
+    t.expect("size:40 100");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn ctrl_c_interrupts_the_guests_command_not_boxq() {
+    let f = Fixture::new();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
+    t.expect_prompt(&f.workspace);
+    t.type_in("sleep 600\r");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    t.type_in("\x03");
+
+    // The prompt is back long before the sleep ends, and a shell reports SIGINT as 130.
+    t.expect_prompt(&f.workspace);
+    t.type_in("echo \"interrupted:$?\"\r");
+    t.expect("interrupted:130");
+    t.type_in("exit\r");
+    assert_eq!(t.exit_code(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_hangup_sent_to_boxq_reaches_the_session() {
+    let f = Fixture::new();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
+    t.expect_prompt(&f.workspace);
+    rustix::process::kill_process(
+        rustix::process::Pid::from_child(&t.child),
+        rustix::process::Signal::HUP,
+    )
+    .unwrap();
+
+    // The guest's shell dies of SIGHUP, which a shell reports as 129.
+    assert_eq!(t.exit_code(), 129);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn run_starts_claude_in_the_workspace_and_shell_works_beside_it() {
+    let f = Fixture::new();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    // A stand-in for Claude Code that shows how it was started, then stays interactive.
+    let stub = r#"printf '#!/bin/sh\necho "claude:$*:$PWD:$IS_SANDBOX"\nexec sh -l\n' \
+        > /usr/local/bin/claude && chmod +x /usr/local/bin/claude"#;
+    assert_eq!(sh(&up.target, stub).await.unwrap().1, 0);
+    let ws = f.workspace.path().to_str().unwrap();
+
+    let mut run = Terminal::boxq(&f, &["run", ws]);
+    run.expect(&format!("claude:--dangerously-skip-permissions:{ws}:1"));
+    run.expect_prompt(&f.workspace);
+    let mut shell = Terminal::boxq(&f, &["shell", ws]);
+    shell.expect_prompt(&f.workspace);
+    shell.type_in("echo beside > /root/note; exit\r");
+    let shell_exit = shell.exit_code();
+    run.type_in("echo \"from:$(cat /root/note)\"\r");
+    run.expect("from:beside");
+    run.type_in("exit 4\r");
+
+    assert_eq!((shell_exit, run.exit_code()), (0, 4));
+}
+
+/// Pulls a large image and Claude Code from npm, so it is slow and needs the network.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn claude_code_is_installed_once_in_a_sandbox_without_it() {
+    let f = Fixture::new();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(NODE_IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+
+    let first = boxq::claude::ensure_installed(&up.target).await.unwrap();
+    let again = boxq::claude::ensure_installed(&up.target).await.unwrap();
+
+    assert_eq!((first, again), (true, false));
+    let (version, code) = sh(&up.target, "claude --version").await.unwrap();
+    assert_eq!(code, 0, "claude --version printed {version:?}");
+    assert_eq!(version, "2.1.312 (Claude Code)\n");
 }
