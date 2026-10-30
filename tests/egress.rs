@@ -23,7 +23,7 @@ fn allow_net(policy: Policy) -> Vec<String> {
 }
 
 #[test]
-fn by_default_the_policy_is_the_built_in_allowlist() {
+fn by_default_the_policy_is_the_agents_entries_and_the_builtins() {
     let policy = Policy::new(&defaults(), None, false, no_dns).unwrap();
 
     assert_eq!(

@@ -92,7 +92,7 @@ impl Policy {
                 }
                 Host::Ipv4(ip) => vec![ip],
                 Host::Ipv6(_) => anyhow::bail!(
-                    "invalid base URL {url:?}: BoxLite's allowlist never matches an IPv6 address"
+                    "invalid base URL {url:?}: the Egress Policy cannot allow an IPv6 address"
                 ),
             };
             // An IP rule for host loopback would open it to any hostname that resolves there.
@@ -107,7 +107,7 @@ impl Policy {
         Ok(Self { allow_net })
     }
 
-    /// The sorted, deduplicated allowlist.
+    /// The sorted, deduplicated entries.
     pub fn allow_net(&self) -> &[String] {
         &self.allow_net
     }
