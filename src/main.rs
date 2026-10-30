@@ -1,4 +1,5 @@
 use boxq::Workspace;
+use boxq::config::Config;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -47,6 +48,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(target) = target {
         let ws = target.workspace()?;
         eprintln!("Workspace {} (Box {})", ws.path().display(), ws.box_name());
+        if matches!(name, "run" | "shell") {
+            Config::from_process_env(&ws)?;
+        }
     }
     anyhow::bail!("`boxq {name}` is not implemented yet")
 }
