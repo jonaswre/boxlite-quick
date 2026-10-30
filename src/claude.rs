@@ -5,15 +5,21 @@ use crate::sandbox::ExecTarget;
 use anyhow::Context;
 use tokio_util::sync::CancellationToken;
 
+/// The release installed, the one boxq's auth is proven with (jonaswre/boxlite-quick#14). The
+/// Sandbox's env turns off its self-updates, so it stays at this release.
+const PACKAGE: &str = "@anthropic-ai/claude-code@2.1.312";
+
 /// Installs Claude Code in the Sandbox unless it has it, returning whether it installed it.
 pub async fn ensure_installed(target: &ExecTarget) -> anyhow::Result<bool> {
     if run_as_root(target, "command -v claude", false).await? == 0 {
         return Ok(false);
     }
     eprintln!("Installing Claude Code in the Sandbox (once)...");
-    let install = "command -v npm >/dev/null || { echo 'the image has no npm' >&2; exit 127; }
-        npm install --global --no-fund --no-audit @anthropic-ai/claude-code";
-    let status = run_as_root(target, install, true).await?;
+    let install = format!(
+        "command -v npm >/dev/null || {{ echo 'the image has no npm' >&2; exit 127; }}
+        npm install --global --no-fund --no-audit {PACKAGE}"
+    );
+    let status = run_as_root(target, &install, true).await?;
     anyhow::ensure!(
         status == 0,
         "cannot install Claude Code in the Sandbox: the install exited with {status}"

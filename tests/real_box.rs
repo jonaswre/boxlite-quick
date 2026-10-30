@@ -9,8 +9,12 @@
 use boxlite::BoxliteRuntime;
 use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
 use boxq::Workspace;
+use boxq::auth::Auth;
+use boxq::config::Egress;
+use boxq::egress::Policy;
 use boxq::reap::reap_box;
 use boxq::sandbox::{ExecTarget, Listed, Sandboxes};
+use boxq::spec::Spec;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -21,10 +25,32 @@ const IMAGE: &str = "alpine:3";
 /// Alpine with git, for the tests that run git in a Sandbox.
 const GIT_IMAGE: &str = "alpine/git:2.49.1";
 
+/// `image` with BoxLite's default resources.
+fn spec(image: &str) -> Spec {
+    Spec {
+        image: image.into(),
+        cpus: None,
+        memory_mib: None,
+        disk_gib: None,
+    }
+}
+
+/// Node, for the test that installs Claude Code from npm.
+const NODE_IMAGE: &str = "node:22-bookworm";
+
+/// A key no test sends anywhere real, distinctive enough to grep a guest for.
+const FAKE_KEY: &str = "boxq-fake-key-6f1c0e9a7b2d4e58";
+
+/// Auth for tests that never reach the base URL.
+fn fake_auth() -> Auth {
+    Auth::new("https://cliproxy.boxq.invalid", FAKE_KEY).unwrap()
+}
+
 /// A temporary boxq home with a temporary Workspace. Every Box in the home is removed on drop, so
 /// a failing test never leaves a VM running.
 struct Fixture {
     sandboxes: Sandboxes,
+    auth: Auth,
     workspace: Workspace,
     dirs: Vec<tempfile::TempDir>,
 }
@@ -34,6 +60,7 @@ impl Fixture {
         let home = tempfile::tempdir().unwrap();
         let mut f = Self {
             sandboxes: Sandboxes::new(home.path()),
+            auth: fake_auth(),
             workspace: Workspace::resolve(home.path()).unwrap(),
             dirs: vec![home],
         };
@@ -80,6 +107,23 @@ impl Drop for Fixture {
     }
 }
 
+/// The Egress Policy with the Global `allow` entries and the Workspace ones, applied only if
+/// `approved`. Names are left unresolved, as no test host is on a tailnet.
+fn policy(allow: &[&str], workspace_allow: &[&str], approved: bool) -> Policy {
+    let egress = Egress {
+        builtins: true,
+        allow: allow.iter().map(|&e| e.into()).collect(),
+        allow_host_loopback: false,
+        workspace_allow: workspace_allow.iter().map(|&e| e.into()).collect(),
+    };
+    Policy::new(&egress, None, approved, |_| vec![]).unwrap()
+}
+
+/// The policy with no config files.
+fn default_policy() -> Policy {
+    policy(&[], &[], false)
+}
+
 /// Runs `sh -c script` through `target`, returning its stdout and exit code.
 async fn sh(target: &ExecTarget, script: &str) -> anyhow::Result<(String, i32)> {
     let token = CancellationToken::new();
@@ -108,7 +152,11 @@ async fn sh(target: &ExecTarget, script: &str) -> anyhow::Result<(String, i32)> 
 async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime() {
     let f = Fixture::new();
 
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     let held = f.runtime();
     let ran = sh(&up.target, "echo hello from the sandbox").await.unwrap();
     drop(held);
@@ -121,11 +169,19 @@ async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_stopped_sandbox_is_reattached_with_its_state() {
     let f = Fixture::new();
-    let first = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let first = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     sh(&first.target, "echo kept > /root/state").await.unwrap();
 
     f.sandboxes.stop(&f.workspace).await.unwrap();
-    let again = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let again = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
 
     assert!(!again.created);
     let read = sh(&again.target, "cat /root/state").await.unwrap();
@@ -140,10 +196,16 @@ async fn a_stopped_sandbox_is_reattached_with_its_state() {
 async fn no_shim_survives_stop_or_rm() {
     let f = Fixture::new();
 
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     f.sandboxes.stop(&f.workspace).await.unwrap();
     let after_stop = shims(&f.sandboxes.boxlite_home()).unwrap();
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     f.sandboxes.rm(&f.workspace).await.unwrap();
     let after_rm = shims(&f.sandboxes.boxlite_home()).unwrap();
 
@@ -170,11 +232,19 @@ fn shims(home: &Path) -> anyhow::Result<Vec<PathBuf>> {
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_removed_sandbox_is_created_afresh() {
     let f = Fixture::new();
-    let first = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let first = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     sh(&first.target, "echo gone > /root/state").await.unwrap();
 
     f.sandboxes.rm(&f.workspace).await.unwrap();
-    let again = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let again = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
 
     assert!(again.created);
     let read = sh(&again.target, "test -e /root/state").await.unwrap();
@@ -202,9 +272,15 @@ async fn sandboxes_are_listed_by_workspace_path() {
     let mut f = Fixture::new();
     let (a, b) = (f.another_workspace(), f.another_workspace());
     let (running, stopped) = if a.path() < b.path() { (a, b) } else { (b, a) };
-    f.sandboxes.up(&stopped, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&stopped, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     f.sandboxes.stop(&stopped).await.unwrap();
-    f.sandboxes.up(&running, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&running, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     // A Box boxq has no record of, as if its record were lost.
     let options = BoxOptions {
         rootfs: RootfsSpec::Image(IMAGE.into()),
@@ -245,7 +321,10 @@ async fn up_waits_for_a_runtime_another_process_holds() {
         drop(held);
     });
 
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await;
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await;
     release.join().unwrap();
 
     assert!(up.unwrap().created);
@@ -279,7 +358,11 @@ async fn git_works_in_a_worktrees_sandbox_as_on_the_host() {
     );
     let worktree = Workspace::resolve(&tmp.join("feature")).unwrap();
 
-    let up = f.sandboxes.up(&worktree, GIT_IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&worktree, &spec(GIT_IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     let script = format!(
         "cd {} && echo hi > note && git add note && \
          git -c user.name=boxq -c user.email=boxq@example.com commit -qm 'from the Sandbox' && \
@@ -297,6 +380,279 @@ async fn git_works_in_a_worktrees_sandbox_as_on_the_host() {
         std::fs::read_to_string(worktree.path().join("note")).unwrap(),
         "hi\n"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_new_sandbox_gets_the_configured_image_and_resources() {
+    let f = Fixture::new();
+    let spec = Spec {
+        cpus: Some(2),
+        memory_mib: Some(768),
+        disk_gib: Some(3),
+        ..spec(GIT_IMAGE)
+    };
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec, &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let (out, code) = sh(
+        &up.target,
+        "nproc; grep MemTotal /proc/meminfo | tr -dc 0-9; echo; df -k / | awk 'NR==2{print $2}'; \
+         git --version >/dev/null && echo has-git",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(code, 0, "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    let [cpus, mem_kib, disk_kib, git] = lines[..] else {
+        panic!("unexpected output: {out:?}");
+    };
+    let mib = |kib: &str| kib.parse::<u64>().unwrap() / 1024;
+    assert_eq!(cpus, "2");
+    // The guest kernel keeps some memory for itself.
+    assert!(
+        (640..=768).contains(&mib(mem_kib)),
+        "MemTotal {mem_kib} KiB"
+    );
+    assert!(
+        (2560..=3072).contains(&mib(disk_kib)),
+        "disk {disk_kib} KiB"
+    );
+    assert_eq!(git, "has-git");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_sandbox_keeps_the_spec_it_was_created_with_until_removed() {
+    let f = Fixture::new();
+    let first = spec(IMAGE);
+    let changed = Spec {
+        cpus: Some(2),
+        ..spec(IMAGE)
+    };
+
+    let created = f
+        .sandboxes
+        .up(&f.workspace, &first, &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let running = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    f.sandboxes.stop(&f.workspace).await.unwrap();
+    let restarted = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let (nproc, _) = sh(&restarted.target, "nproc").await.unwrap();
+    f.sandboxes.rm(&f.workspace).await.unwrap();
+    let recreated = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy(), &f.auth)
+        .await
+        .unwrap();
+
+    assert_eq!(created.as_created, Some(first.clone()));
+    assert_eq!(running.as_created, Some(first.clone()));
+    assert_eq!(restarted.as_created, Some(first));
+    assert_eq!(nproc, "1\n");
+    assert_eq!(recreated.as_created, Some(changed));
+}
+
+/// Whether an HTTPS GET of `url` from the Sandbox succeeds.
+async fn reaches(target: &ExecTarget, url: &str) -> bool {
+    let script = format!("wget -q -T 15 -O /dev/null {url}");
+    sh(target, &script).await.unwrap().1 == 0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM and internet access"]
+async fn listed_hosts_are_reachable_and_unlisted_ones_refused() {
+    let f = Fixture::new();
+    let policy = policy(&["example.com"], &["example.org"], false);
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &policy, &f.auth)
+        .await
+        .unwrap();
+
+    assert!(
+        reaches(&up.target, "https://example.com").await,
+        "a Global entry"
+    );
+    assert!(
+        reaches(&up.target, "https://registry.npmjs.org/").await,
+        "a built-in entry"
+    );
+    assert!(
+        !reaches(&up.target, "https://example.net").await,
+        "an unlisted host"
+    );
+    assert!(
+        !reaches(&up.target, "https://example.org").await,
+        "an unapproved Workspace entry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM and internet access"]
+async fn a_running_sandbox_gets_the_policy_of_each_up() {
+    let f = Fixture::new();
+    let first = f
+        .sandboxes
+        .up(
+            &f.workspace,
+            &spec(IMAGE),
+            &policy(&["example.com"], &["example.org"], false),
+            &f.auth,
+        )
+        .await
+        .unwrap();
+    let refused_before = !reaches(&first.target, "https://example.org").await;
+
+    let again = f
+        .sandboxes
+        .up(
+            &f.workspace,
+            &spec(IMAGE),
+            &policy(&[], &["example.org"], true),
+            &f.auth,
+        )
+        .await
+        .unwrap();
+
+    assert!(refused_before);
+    assert!(!again.created);
+    assert!(
+        reaches(&again.target, "https://example.org").await,
+        "approved since"
+    );
+    assert!(
+        !reaches(&again.target, "https://example.com").await,
+        "dropped since"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn the_guest_holds_only_the_placeholder_never_the_key() {
+    let f = Fixture::new();
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let token = sh(&up.target, "printf %s \"$ANTHROPIC_AUTH_TOKEN\"")
+        .await
+        .unwrap();
+    // Every process's env and command line, and every file on the guest's own disk, read out
+    // to be searched here: searching in the guest would need the key in the guest.
+    let dump = sh(
+        &up.target,
+        "for p in /proc/[0-9]*; do cat $p/environ $p/cmdline; echo; done; cat /proc/cmdline; \
+         find / -xdev -type f -exec cat {} + ; true",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(token, ("<BOXLITE_SECRET:anthropic>".into(), 0));
+    assert!(
+        dump.0.contains("<BOXLITE_SECRET:anthropic>"),
+        "dump missed the env"
+    );
+    assert!(!dump.0.contains(FAKE_KEY), "the key is in the guest");
+}
+
+/// BoxLite fixes a Box's secrets and env at creation, so a rotated key or a moved base URL
+/// reaches only a recreated Sandbox.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_sandbox_reports_when_it_was_created_with_other_auth() {
+    let f = Fixture::new();
+    let rotated = Auth::new("https://cliproxy.boxq.invalid", "boxq-rotated-key").unwrap();
+    let moved = Auth::new("https://moved.boxq.invalid", FAKE_KEY).unwrap();
+    let (spec, policy, same) = (spec(IMAGE), default_policy(), fake_auth());
+    let up = |auth| f.sandboxes.up(&f.workspace, &spec, &policy, auth);
+
+    let first = up(&f.auth).await.unwrap();
+    let unchanged = up(&same).await.unwrap();
+    let after_rotation = up(&rotated).await.unwrap();
+    let after_move = up(&moved).await.unwrap();
+    f.sandboxes.rm(&f.workspace).await.unwrap();
+    let recreated = up(&rotated).await.unwrap();
+
+    let changed = |up: &boxq::sandbox::Up| up.auth_changed;
+    assert_eq!(
+        [&first, &unchanged, &after_rotation, &after_move, &recreated].map(changed),
+        [false, false, true, true, false]
+    );
+}
+
+/// The Claude Code release the auth test installs, as the image will pin one.
+const CLAUDE_CODE: &str = "@anthropic-ai/claude-code@2.1.312";
+
+/// Needs a real base URL and key, so it reads them from `BOXQ_TEST_BASE_URL` and
+/// `BOXQ_TEST_API_KEY` and passes vacuously without them, as in CI.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn claude_code_authenticates_through_the_placeholder() {
+    let (Ok(base_url), Ok(key)) = (
+        std::env::var("BOXQ_TEST_BASE_URL"),
+        std::env::var("BOXQ_TEST_API_KEY"),
+    ) else {
+        eprintln!("skipped: set BOXQ_TEST_BASE_URL and BOXQ_TEST_API_KEY to run it");
+        return;
+    };
+    let f = Fixture::new();
+    let auth = Auth::new(&base_url, &key).unwrap();
+    let egress = Egress {
+        builtins: true,
+        allow: vec![],
+        allow_host_loopback: false,
+        workspace_allow: vec![],
+    };
+    // The base URL's real addresses, which a tailnet host needs next to its name.
+    let resolve = |host: &str| {
+        use std::net::{SocketAddr, ToSocketAddrs};
+        let addrs = (host, 443).to_socket_addrs().unwrap();
+        let v4 = addrs.filter_map(|a| match a {
+            SocketAddr::V4(a) => Some(*a.ip()),
+            SocketAddr::V6(_) => None,
+        });
+        v4.collect()
+    };
+    let policy = Policy::new(&egress, Some(&base_url), false, resolve).unwrap();
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(NODE_IMAGE), &policy, &auth)
+        .await
+        .unwrap();
+    let install = sh(
+        &up.target,
+        &format!("npm install -g --no-fund --no-audit {CLAUDE_CODE} >&2"),
+    )
+    .await
+    .unwrap();
+    let asked = sh(
+        &up.target,
+        "claude -p 'Reply with the single word pong, in lower case.' 2>&1",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(install.1, 0, "npm install failed");
+    assert_eq!(asked.1, 0, "claude failed: {}", asked.0);
+    assert!(asked.0.to_lowercase().contains("pong"), "{}", asked.0);
 }
 
 /// A `boxq` process on its own pseudo-terminal, as a user's terminal runs it.
@@ -329,6 +685,9 @@ impl Terminal {
         cmd.args(args)
             .env("BOXQ_HOME", f.sandboxes.boxlite_home().parent().unwrap())
             .env("XDG_CONFIG_HOME", f.sandboxes.boxlite_home())
+            .env("XDG_STATE_HOME", f.sandboxes.boxlite_home())
+            .env("BOXQ_BASE_URL", "https://cliproxy.boxq.invalid")
+            .env("BOXQ_API_KEY", FAKE_KEY)
             .env("TERM", "xterm-256color")
             .stdin(slave.try_clone().unwrap())
             .stdout(slave.try_clone().unwrap())
@@ -433,7 +792,10 @@ impl Drop for Terminal {
 #[ignore = "boots a real Box; needs KVM"]
 async fn shell_opens_a_root_shell_in_the_workspace_and_leaves_the_sandbox_running() {
     let f = Fixture::new();
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     let ws = f.workspace.path().to_str().unwrap();
 
     let mut t = Terminal::boxq(&f, &["shell", ws]);
@@ -452,7 +814,10 @@ async fn shell_opens_a_root_shell_in_the_workspace_and_leaves_the_sandbox_runnin
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_session_follows_its_terminals_size() {
     let f = Fixture::new();
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
     t.expect_prompt(&f.workspace);
     t.type_in("echo \"size:$(stty size)\"\r");
@@ -470,7 +835,10 @@ async fn a_session_follows_its_terminals_size() {
 #[ignore = "boots a real Box; needs KVM"]
 async fn ctrl_c_interrupts_the_guests_command_not_boxq() {
     let f = Fixture::new();
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
     t.expect_prompt(&f.workspace);
     t.type_in("sleep 600\r");
@@ -490,7 +858,10 @@ async fn ctrl_c_interrupts_the_guests_command_not_boxq() {
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_hangup_sent_to_boxq_reaches_the_session() {
     let f = Fixture::new();
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
     t.expect_prompt(&f.workspace);
     rustix::process::kill_process(
@@ -507,7 +878,11 @@ async fn a_hangup_sent_to_boxq_reaches_the_session() {
 #[ignore = "boots a real Box; needs KVM"]
 async fn run_starts_claude_in_the_workspace_and_shell_works_beside_it() {
     let f = Fixture::new();
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
     // A stand-in for Claude Code that shows how it was started, then stays interactive.
     let stub = r#"printf '#!/bin/sh\necho "claude:$*:$PWD:$IS_SANDBOX"\nexec sh -l\n' \
         > /usr/local/bin/claude && chmod +x /usr/local/bin/claude"#;
@@ -528,15 +903,16 @@ async fn run_starts_claude_in_the_workspace_and_shell_works_beside_it() {
     assert_eq!((shell_exit, run.exit_code()), (0, 4));
 }
 
-/// The interim image `boxq run` creates Sandboxes from, which has no Claude Code.
-const INTERIM_IMAGE: &str = "node:22-bookworm";
-
 /// Pulls a large image and Claude Code from npm, so it is slow and needs the network.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "boots a real Box; needs KVM"]
 async fn claude_code_is_installed_once_in_a_sandbox_without_it() {
     let f = Fixture::new();
-    let up = f.sandboxes.up(&f.workspace, INTERIM_IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(NODE_IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
 
     let first = boxq::claude::ensure_installed(&up.target).await.unwrap();
     let again = boxq::claude::ensure_installed(&up.target).await.unwrap();
@@ -544,5 +920,5 @@ async fn claude_code_is_installed_once_in_a_sandbox_without_it() {
     assert_eq!((first, again), (true, false));
     let (version, code) = sh(&up.target, "claude --version").await.unwrap();
     assert_eq!(code, 0, "claude --version printed {version:?}");
-    assert!(version.contains("Claude Code"), "{version:?}");
+    assert_eq!(version, "2.1.312 (Claude Code)\n");
 }
