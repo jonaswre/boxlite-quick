@@ -1,0 +1,118 @@
+name: Base Image
+
+# Builds boxq's Base Image, boots a real Box from the exact build and publishes it only if
+# Claude Code starts there with no prompts (jonaswre/boxlite-quick#29). No PR is opened: one
+# opened with GITHUB_TOKEN wouldn't trigger CI, so the pin in src/spec.rs is bumped by hand.
+on:
+  push:
+    branches: [main]
+    paths: [image/**, .github/workflows/image.yml]
+  pull_request:
+    paths: [image/**, .github/workflows/image.yml]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/jonaswre/boxq
+
+jobs:
+  # A pull request only proves the Dockerfile builds, since nothing is pushed for it.
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: image
+          platforms: linux/amd64
+
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Name the tag after the Claude Code release and the commit
+        run: |
+          version=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' image/Dockerfile)
+          test -n "$version"
+          echo "TAG=$version-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      # Pushed untagged, so a build that fails the test below is never published under a tag.
+      # No attestations: they would wrap the manifest in an index.
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: image
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Check the image is pulled anonymously, as boxq pulls it
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:${IMAGE#ghcr.io/}:pull" | jq -r .token)
+          curl -fsS -o /dev/null -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/${IMAGE#ghcr.io/}/manifests/$DIGEST" || {
+            echo "::error::$IMAGE is private. Make it public at https://github.com/users/${GITHUB_REPOSITORY_OWNER}/packages/container/${IMAGE##*/}/settings, then re-run this workflow."
+            exit 1
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc, which BoxLite's build needs
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Give the runner user /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle
+          test -r /dev/kvm && test -w /dev/kvm
+      - name: Let BoxLite's bwrap jailer use user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Start Claude Code in a real Box from the build
+        env:
+          BOXQ_TEST_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          cargo test --locked --test real_box -- --ignored --exact \
+            claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts
+
+      # The manifest is put back under the tag byte for byte, so the tag keeps the tested digest.
+      - name: Tag the tested build
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo=${IMAGE#ghcr.io/}
+          token=$(curl -fsS -u "$GITHUB_ACTOR:$TOKEN" \
+            "https://ghcr.io/token?scope=repository:$repo:pull,push" | jq -r .token)
+          curl -fsS -o manifest.json -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/$repo/manifests/$DIGEST"
+          curl -fsS -X PUT -H "Authorization: Bearer $token" \
+            -H "Content-Type: $(jq -r .mediaType manifest.json)" \
+            --data-binary @manifest.json "https://ghcr.io/v2/$repo/manifests/$TAG"
+          tagged=$(curl -fsSI -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/$repo/manifests/$TAG" \
+            | tr -d '\r' | awk -F': ' 'tolower($1) == "docker-content-digest" { print $2 }')
+          test "$tagged" = "$DIGEST"
+          {
+            echo "Published and tested. Pin it in \`src/spec.rs\`:"
+            echo
+            echo "    $IMAGE:$TAG@$DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"

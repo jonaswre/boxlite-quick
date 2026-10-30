@@ -925,14 +925,26 @@ fn plain(screen: &str) -> String {
 async fn claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
+    // The image workflow sets this to the Base Image build it is about to publish.
+    let image = std::env::var("BOXQ_TEST_IMAGE").ok();
     let up = f
         .sandboxes
-        .up(&f.workspace, &spec(NODE_IMAGE), &default_policy(), &f.auth)
+        .up(
+            &f.workspace,
+            &spec(image.as_deref().unwrap_or(NODE_IMAGE)),
+            &default_policy(),
+            &f.auth,
+        )
         .await
         .unwrap();
-    // The release boxq installs: prompts and their keys change between releases, so this test is
-    // what proves the seeded keys still skip them.
-    boxq::claude::ensure_installed(&up.target).await.unwrap();
+    // Prompts and their keys change between releases, so this test is what proves the seeded
+    // keys still skip them in the release boxq installs, or the one an image under test ships.
+    if image.is_some() {
+        let (version, code) = sh(&up.target, "claude --version").await.unwrap();
+        assert_eq!(code, 0, "the image has no working claude: {version}");
+    } else {
+        boxq::claude::ensure_installed(&up.target).await.unwrap();
+    }
 
     host.sync(&f.workspace, &up.target).await.unwrap();
 

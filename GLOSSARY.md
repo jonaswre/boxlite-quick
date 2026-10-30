@@ -16,6 +16,10 @@ _Avoid_: Sandbox, VM
 The host directory shared into a Sandbox for the Agent to work on.
 _Avoid_: Project, mount, volume
 
+**Base Image**:
+boxq's own image, which a Sandbox is created from unless the config sets another. A generic core with the Agent preinstalled, and none of boxq's config.
+_Avoid_: Default image, container image, base
+
 **Agent**:
 The AI coding tool run inside a Sandbox, such as Claude Code.
 _Avoid_: Assistant, bot, model
