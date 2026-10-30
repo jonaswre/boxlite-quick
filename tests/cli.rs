@@ -1,4 +1,5 @@
-//! The `boxq` binary itself, for what no Box has to boot for.
+//! The `boxq` binary itself, for what no Box has to boot for. Tests that open the BoxLite runtime
+//! still need KVM, so they're ignored here and run by CI's real-Box job.
 
 use boxq::Workspace;
 use boxq::egress::Approvals;
@@ -71,6 +72,7 @@ fn rm_keeps_the_egress_approval_when_the_sandbox_cannot_be_removed() {
 }
 
 #[test]
+#[ignore = "opens the BoxLite runtime; needs KVM"]
 fn rm_forgets_the_egress_approval_even_without_a_sandbox() {
     let host = Host::new();
     let ws = host.ws.path().to_str().unwrap();
