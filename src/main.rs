@@ -1,13 +1,11 @@
 use boxq::Workspace;
 use boxq::claude_config::ClaudeConfig;
 use boxq::config::Config;
+use boxq::egress::{Approvals, Policy};
 use boxq::sandbox::Sandboxes;
+use boxq::spec::Spec;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-
-/// The image every Sandbox is created from, until the base image leaves the map's fog and the
-/// configured image is used (jonaswre/boxlite-quick#18).
-const INTERIM_IMAGE: &str = "node:22-bookworm";
 
 /// Run Claude Code against a Workspace inside an isolated Sandbox.
 #[derive(Parser)]
@@ -49,19 +47,29 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Run(t) => {
             let ws = t.workspace()?;
-            Config::from_process_env(&ws)?;
+            let config = Config::from_process_env(&ws)?;
+            let spec = Spec::new(config.image.as_deref(), &config.resources)?;
+            let egress = Policy::from_process_env(&ws, &config)?;
             let claude_config = ClaudeConfig::from_process_env()?;
-            let up = sandboxes.up(&ws, INTERIM_IMAGE).await?;
+            let up = sandboxes.up(&ws, &spec, &egress).await?;
             let did = if up.created {
                 "Created"
             } else {
                 "Reattached to"
             };
             eprintln!("{did} the Sandbox for {}", ws.path().display());
+            let warning = up
+                .as_created
+                .and_then(|c| spec.mismatch_warning(&c, ws.path()));
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
             claude_config.sync(&ws, &up.target).await?;
         }
         Command::Shell(t) => {
-            Config::from_process_env(&t.workspace()?)?;
+            let ws = t.workspace()?;
+            let config = Config::from_process_env(&ws)?;
+            Policy::from_process_env(&ws, &config)?;
             anyhow::bail!("`boxq shell` is not implemented yet");
         }
         Command::Ls => {
@@ -80,6 +88,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Rm(t) => {
             let ws = t.workspace()?;
+            // Forgotten even if there is no Sandbox, so `rm` always resets the Workspace.
+            Approvals::from_process_env()?.revoke(&ws)?;
             sandboxes.rm(&ws).await?;
             eprintln!("Removed the Sandbox for {}", ws.path().display());
         }

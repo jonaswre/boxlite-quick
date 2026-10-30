@@ -10,8 +10,11 @@ use boxlite::BoxliteRuntime;
 use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
 use boxq::Workspace;
 use boxq::claude_config::ClaudeConfig;
+use boxq::config::Egress;
+use boxq::egress::Policy;
 use boxq::reap::reap_box;
 use boxq::sandbox::{ExecTarget, Listed, Sandboxes};
+use boxq::spec::Spec;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +23,16 @@ const IMAGE: &str = "alpine:3";
 
 /// Alpine with git, for the tests that run git in a Sandbox.
 const GIT_IMAGE: &str = "alpine/git:2.49.1";
+
+/// `image` with BoxLite's default resources.
+fn spec(image: &str) -> Spec {
+    Spec {
+        image: image.into(),
+        cpus: None,
+        memory_mib: None,
+        disk_gib: None,
+    }
+}
 
 /// A temporary boxq home with a temporary Workspace. Every Box in the home is removed on drop, so
 /// a failing test never leaves a VM running.
@@ -80,6 +93,23 @@ impl Drop for Fixture {
     }
 }
 
+/// The Egress Policy with the Global `allow` entries and the Workspace ones, applied only if
+/// `approved`. Names are left unresolved, as no test host is on a tailnet.
+fn policy(allow: &[&str], workspace_allow: &[&str], approved: bool) -> Policy {
+    let egress = Egress {
+        builtins: true,
+        allow: allow.iter().map(|&e| e.into()).collect(),
+        allow_host_loopback: false,
+        workspace_allow: workspace_allow.iter().map(|&e| e.into()).collect(),
+    };
+    Policy::new(&egress, None, approved, |_| vec![]).unwrap()
+}
+
+/// The policy with no config files.
+fn default_policy() -> Policy {
+    policy(&[], &[], false)
+}
+
 /// Runs `sh -c script` through `target`, returning its stdout and exit code.
 async fn sh(target: &ExecTarget, script: &str) -> anyhow::Result<(String, i32)> {
     let token = CancellationToken::new();
@@ -108,7 +138,11 @@ async fn sh(target: &ExecTarget, script: &str) -> anyhow::Result<(String, i32)> 
 async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime() {
     let f = Fixture::new();
 
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
     let held = f.runtime();
     let ran = sh(&up.target, "echo hello from the sandbox").await.unwrap();
     drop(held);
@@ -121,11 +155,19 @@ async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_stopped_sandbox_is_reattached_with_its_state() {
     let f = Fixture::new();
-    let first = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let first = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
     sh(&first.target, "echo kept > /root/state").await.unwrap();
 
     f.sandboxes.stop(&f.workspace).await.unwrap();
-    let again = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let again = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
 
     assert!(!again.created);
     let read = sh(&again.target, "cat /root/state").await.unwrap();
@@ -140,10 +182,16 @@ async fn a_stopped_sandbox_is_reattached_with_its_state() {
 async fn no_shim_survives_stop_or_rm() {
     let f = Fixture::new();
 
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
     f.sandboxes.stop(&f.workspace).await.unwrap();
     let after_stop = shims(&f.sandboxes.boxlite_home()).unwrap();
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
     f.sandboxes.rm(&f.workspace).await.unwrap();
     let after_rm = shims(&f.sandboxes.boxlite_home()).unwrap();
 
@@ -170,11 +218,19 @@ fn shims(home: &Path) -> anyhow::Result<Vec<PathBuf>> {
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_removed_sandbox_is_created_afresh() {
     let f = Fixture::new();
-    let first = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let first = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
     sh(&first.target, "echo gone > /root/state").await.unwrap();
 
     f.sandboxes.rm(&f.workspace).await.unwrap();
-    let again = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let again = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
 
     assert!(again.created);
     let read = sh(&again.target, "test -e /root/state").await.unwrap();
@@ -202,9 +258,15 @@ async fn sandboxes_are_listed_by_workspace_path() {
     let mut f = Fixture::new();
     let (a, b) = (f.another_workspace(), f.another_workspace());
     let (running, stopped) = if a.path() < b.path() { (a, b) } else { (b, a) };
-    f.sandboxes.up(&stopped, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&stopped, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
     f.sandboxes.stop(&stopped).await.unwrap();
-    f.sandboxes.up(&running, IMAGE).await.unwrap();
+    f.sandboxes
+        .up(&running, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
     // A Box boxq has no record of, as if its record were lost.
     let options = BoxOptions {
         rootfs: RootfsSpec::Image(IMAGE.into()),
@@ -245,7 +307,10 @@ async fn up_waits_for_a_runtime_another_process_holds() {
         drop(held);
     });
 
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await;
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await;
     release.join().unwrap();
 
     assert!(up.unwrap().created);
@@ -279,7 +344,11 @@ async fn git_works_in_a_worktrees_sandbox_as_on_the_host() {
     );
     let worktree = Workspace::resolve(&tmp.join("feature")).unwrap();
 
-    let up = f.sandboxes.up(&worktree, GIT_IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&worktree, &spec(GIT_IMAGE), &default_policy())
+        .await
+        .unwrap();
     let script = format!(
         "cd {} && echo hi > note && git add note && \
          git -c user.name=boxq -c user.email=boxq@example.com commit -qm 'from the Sandbox' && \
@@ -296,6 +365,163 @@ async fn git_works_in_a_worktrees_sandbox_as_on_the_host() {
     assert_eq!(
         std::fs::read_to_string(worktree.path().join("note")).unwrap(),
         "hi\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_new_sandbox_gets_the_configured_image_and_resources() {
+    let f = Fixture::new();
+    let spec = Spec {
+        cpus: Some(2),
+        memory_mib: Some(768),
+        disk_gib: Some(3),
+        ..spec(GIT_IMAGE)
+    };
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec, &default_policy())
+        .await
+        .unwrap();
+    let (out, code) = sh(
+        &up.target,
+        "nproc; grep MemTotal /proc/meminfo | tr -dc 0-9; echo; df -k / | awk 'NR==2{print $2}'; \
+         git --version >/dev/null && echo has-git",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(code, 0, "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    let [cpus, mem_kib, disk_kib, git] = lines[..] else {
+        panic!("unexpected output: {out:?}");
+    };
+    let mib = |kib: &str| kib.parse::<u64>().unwrap() / 1024;
+    assert_eq!(cpus, "2");
+    // The guest kernel keeps some memory for itself.
+    assert!(
+        (640..=768).contains(&mib(mem_kib)),
+        "MemTotal {mem_kib} KiB"
+    );
+    assert!(
+        (2560..=3072).contains(&mib(disk_kib)),
+        "disk {disk_kib} KiB"
+    );
+    assert_eq!(git, "has-git");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_sandbox_keeps_the_spec_it_was_created_with_until_removed() {
+    let f = Fixture::new();
+    let first = spec(IMAGE);
+    let changed = Spec {
+        cpus: Some(2),
+        ..spec(IMAGE)
+    };
+
+    let created = f
+        .sandboxes
+        .up(&f.workspace, &first, &default_policy())
+        .await
+        .unwrap();
+    let running = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy())
+        .await
+        .unwrap();
+    f.sandboxes.stop(&f.workspace).await.unwrap();
+    let restarted = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy())
+        .await
+        .unwrap();
+    let (nproc, _) = sh(&restarted.target, "nproc").await.unwrap();
+    f.sandboxes.rm(&f.workspace).await.unwrap();
+    let recreated = f
+        .sandboxes
+        .up(&f.workspace, &changed, &default_policy())
+        .await
+        .unwrap();
+
+    assert_eq!(created.as_created, Some(first.clone()));
+    assert_eq!(running.as_created, Some(first.clone()));
+    assert_eq!(restarted.as_created, Some(first));
+    assert_eq!(nproc, "1\n");
+    assert_eq!(recreated.as_created, Some(changed));
+}
+
+/// Whether an HTTPS GET of `url` from the Sandbox succeeds.
+async fn reaches(target: &ExecTarget, url: &str) -> bool {
+    let script = format!("wget -q -T 15 -O /dev/null {url}");
+    sh(target, &script).await.unwrap().1 == 0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM and internet access"]
+async fn listed_hosts_are_reachable_and_unlisted_ones_refused() {
+    let f = Fixture::new();
+    let policy = policy(&["example.com"], &["example.org"], false);
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &policy)
+        .await
+        .unwrap();
+
+    assert!(
+        reaches(&up.target, "https://example.com").await,
+        "a Global entry"
+    );
+    assert!(
+        reaches(&up.target, "https://registry.npmjs.org/").await,
+        "a built-in entry"
+    );
+    assert!(
+        !reaches(&up.target, "https://example.net").await,
+        "an unlisted host"
+    );
+    assert!(
+        !reaches(&up.target, "https://example.org").await,
+        "an unapproved Workspace entry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM and internet access"]
+async fn a_running_sandbox_gets_the_policy_of_each_up() {
+    let f = Fixture::new();
+    let first = f
+        .sandboxes
+        .up(
+            &f.workspace,
+            &spec(IMAGE),
+            &policy(&["example.com"], &["example.org"], false),
+        )
+        .await
+        .unwrap();
+    let refused_before = !reaches(&first.target, "https://example.org").await;
+
+    let again = f
+        .sandboxes
+        .up(
+            &f.workspace,
+            &spec(IMAGE),
+            &policy(&[], &["example.org"], true),
+        )
+        .await
+        .unwrap();
+
+    assert!(refused_before);
+    assert!(!again.created);
+    assert!(
+        reaches(&again.target, "https://example.org").await,
+        "approved since"
+    );
+    assert!(
+        !reaches(&again.target, "https://example.com").await,
+        "dropped since"
     );
 }
 
@@ -326,7 +552,11 @@ fn host_claude_config(dir: &Path, ws: &Workspace) -> ClaudeConfig {
 async fn the_hosts_claude_config_merges_into_the_sandboxs_own() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
     sh(
         &up.target,
         r#"mkdir -p /root/.claude && echo '{"numStartups": 3}' > /root/.claude.json &&
@@ -383,7 +613,11 @@ async fn the_hosts_claude_config_merges_into_the_sandboxs_own() {
 async fn a_sandbox_without_claude_config_gets_one() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy())
+        .await
+        .unwrap();
 
     host.sync(&f.workspace, &up.target).await.unwrap();
     host.sync(&f.workspace, &up.target).await.unwrap();
@@ -463,11 +697,15 @@ fn plain(screen: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "boots a real Box; needs KVM"]
+#[ignore = "boots a real Box; needs KVM and internet access"]
 async fn claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
-    let up = f.sandboxes.up(&f.workspace, NODE_IMAGE).await.unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(NODE_IMAGE), &default_policy())
+        .await
+        .unwrap();
     let install = format!("npm install -g --no-fund --no-audit {CLAUDE_CODE} >/dev/null 2>&1");
     assert_eq!(sh(&up.target, &install).await.unwrap().1, 0);
 
