@@ -25,6 +25,31 @@ impl Workspace {
         &self.path
     }
 
+    /// The host directories shared into the Sandbox, each at its own path: the Workspace, and
+    /// the git directory a worktree or submodule keeps outside it, so git works unchanged in the
+    /// Sandbox.
+    pub fn shared_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![self.path.clone()];
+        dirs.extend(self.outside_git_dir());
+        dirs
+    }
+
+    /// The common git directory a `.git` file points to, if it is outside the Workspace. A
+    /// worktree's `.git` file points into its repo's `.git`, which `commondir` names; a
+    /// submodule's points at its own. A `.git` file git can't follow on the host is ignored, so
+    /// git fails in the Sandbox just as it does there.
+    fn outside_git_dir(&self) -> Option<PathBuf> {
+        let file = std::fs::read_to_string(self.path.join(".git")).ok()?;
+        let git_dir = self.path.join(file.strip_prefix("gitdir: ")?.trim_end());
+        let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(common) => git_dir.join(common.trim_end()),
+            Err(_) => git_dir,
+        };
+        std::fs::canonicalize(common)
+            .ok()
+            .filter(|dir| !dir.starts_with(&self.path))
+    }
+
     /// The name of the Box backing this Workspace's Sandbox. It must never change for a
     /// given path, or boxq would lose track of existing Sandboxes.
     pub fn box_name(&self) -> String {
