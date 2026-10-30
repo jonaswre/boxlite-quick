@@ -43,6 +43,18 @@ pub struct Listed {
     pub running: bool,
 }
 
+/// The error for a Workspace that has no Sandbox to stop or remove.
+#[derive(Debug)]
+pub struct NoSandbox(PathBuf);
+
+impl std::fmt::Display for NoSandbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} has no Sandbox", self.0.display())
+    }
+}
+
+impl std::error::Error for NoSandbox {}
+
 /// What boxq keeps about a Sandbox that its Box can't carry.
 #[derive(Serialize, Deserialize)]
 struct Record {
@@ -185,7 +197,7 @@ impl Sandboxes {
     pub async fn stop(&self, ws: &Workspace) -> anyhow::Result<()> {
         let rt = runtime::open(&self.boxlite_home())?;
         let Some(b) = rt.get(&ws.box_name()).await? else {
-            anyhow::bail!("{} has no Sandbox", ws.path().display());
+            return Err(NoSandbox(ws.path().into()).into());
         };
         if b.info().await?.status == BoxStatus::Running {
             b.stop().await?;
@@ -197,7 +209,7 @@ impl Sandboxes {
     pub async fn rm(&self, ws: &Workspace) -> anyhow::Result<()> {
         let rt = runtime::open(&self.boxlite_home())?;
         let Some(info) = rt.get_info(&ws.box_name()).await? else {
-            anyhow::bail!("{} has no Sandbox", ws.path().display());
+            return Err(NoSandbox(ws.path().into()).into());
         };
         rt.remove(&ws.box_name(), true).await?;
         reap_box(&self.boxlite_home(), info.id.as_ref())?;

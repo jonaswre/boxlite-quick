@@ -4,8 +4,7 @@ use boxq::claude;
 use boxq::claude_config::ClaudeConfig;
 use boxq::config::Config;
 use boxq::egress::{Approvals, Policy};
-use boxq::sandbox::Sandboxes;
-use boxq::sandbox::Up;
+use boxq::sandbox::{NoSandbox, Sandboxes, Up};
 use boxq::session;
 use boxq::spec::Spec;
 use clap::{Parser, Subcommand};
@@ -80,9 +79,17 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Rm(t) => {
             let ws = t.workspace()?;
-            // Forgotten even if there is no Sandbox, so `rm` always resets the Workspace.
-            Approvals::from_process_env()?.revoke(&ws)?;
-            sandboxes.rm(&ws).await?;
+            let removed = sandboxes.rm(&ws).await;
+            // Forgotten even if there is no Sandbox, so `rm` always resets the Workspace, but
+            // kept if removing the Sandbox failed, since it may still be there.
+            let gone = match &removed {
+                Ok(()) => true,
+                Err(e) => e.is::<NoSandbox>(),
+            };
+            if gone {
+                Approvals::from_process_env()?.revoke(&ws)?;
+            }
+            removed?;
             eprintln!("Removed the Sandbox for {}", ws.path().display());
         }
     }
