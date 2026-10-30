@@ -811,6 +811,34 @@ async fn a_sandbox_without_claude_config_gets_one() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "boots a real Box; needs KVM"]
+async fn a_claude_config_larger_than_one_exec_message_is_synced() {
+    let mut f = Fixture::new();
+    let dir = f.temp_dir();
+    let host = host_claude_config(&dir, &f.workspace);
+    // BoxLite's guest refuses a single stdin message over 4 MiB.
+    std::fs::write(dir.join("dotfiles/review/asset.bin"), vec![7u8; 5 << 20]).unwrap();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        host.sync(&f.workspace, &up.target),
+    )
+    .await
+    .expect("the sync hung")
+    .unwrap();
+
+    let synced = sh(&up.target, "wc -c < /root/.claude/skills/review/asset.bin")
+        .await
+        .unwrap();
+    assert_eq!(synced, (format!("{}\n", 5 << 20), 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
 async fn the_claude_config_reaches_roots_home_whatever_the_images_user() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);

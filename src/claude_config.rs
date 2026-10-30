@@ -296,11 +296,12 @@ async fn run(target: &ExecTarget, argv: &[&str], stdin: Vec<u8>) -> anyhow::Resu
         .exec(command, token)
         .await
         .with_context(|| format!("cannot run {} in the Sandbox", argv[0]))?;
-    // Dropping the sender closes the command's stdin.
-    if let Some(tx) = exec.stdin_tx.take()
-        && !stdin.is_empty()
-    {
-        let _ = tx.send(stdin);
+    // Chunked, because BoxLite's guest refuses a stdin message over 4 MiB. Dropping the sender
+    // closes the command's stdin.
+    if let Some(tx) = exec.stdin_tx.take() {
+        for chunk in stdin.chunks(64 << 10) {
+            let _ = tx.send(chunk.to_vec());
+        }
     }
     let (mut stdout, mut stderr) = (String::new(), String::new());
     let mut output = OutputChunks::new(exec.stdout_rx, exec.stderr_rx);
