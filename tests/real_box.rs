@@ -9,6 +9,7 @@
 use boxlite::BoxliteRuntime;
 use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
 use boxq::Workspace;
+use boxq::auth::Auth;
 use boxq::reap::reap_box;
 use boxq::sandbox::{ExecTarget, Listed, Sandboxes};
 use std::path::{Path, PathBuf};
@@ -20,10 +21,22 @@ const IMAGE: &str = "alpine:3";
 /// Alpine with git, for the tests that run git in a Sandbox.
 const GIT_IMAGE: &str = "alpine/git:2.49.1";
 
+/// Node, for the test that installs Claude Code from npm.
+const NODE_IMAGE: &str = "node:22-bookworm";
+
+/// A key no test sends anywhere real, distinctive enough to grep a guest for.
+const FAKE_KEY: &str = "boxq-fake-key-6f1c0e9a7b2d4e58";
+
+/// Auth for tests that never reach the base URL.
+fn fake_auth() -> Auth {
+    Auth::new("https://cliproxy.boxq.invalid", FAKE_KEY).unwrap()
+}
+
 /// A temporary boxq home with a temporary Workspace. Every Box in the home is removed on drop, so
 /// a failing test never leaves a VM running.
 struct Fixture {
     sandboxes: Sandboxes,
+    auth: Auth,
     workspace: Workspace,
     dirs: Vec<tempfile::TempDir>,
 }
@@ -33,6 +46,7 @@ impl Fixture {
         let home = tempfile::tempdir().unwrap();
         let mut f = Self {
             sandboxes: Sandboxes::new(home.path()),
+            auth: fake_auth(),
             workspace: Workspace::resolve(home.path()).unwrap(),
             dirs: vec![home],
         };
@@ -107,7 +121,7 @@ async fn sh(target: &ExecTarget, script: &str) -> anyhow::Result<(String, i32)> 
 async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime() {
     let f = Fixture::new();
 
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let up = f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
     let held = f.runtime();
     let ran = sh(&up.target, "echo hello from the sandbox").await.unwrap();
     drop(held);
@@ -120,11 +134,11 @@ async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_stopped_sandbox_is_reattached_with_its_state() {
     let f = Fixture::new();
-    let first = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let first = f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
     sh(&first.target, "echo kept > /root/state").await.unwrap();
 
     f.sandboxes.stop(&f.workspace).await.unwrap();
-    let again = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let again = f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
 
     assert!(!again.created);
     let read = sh(&again.target, "cat /root/state").await.unwrap();
@@ -139,10 +153,10 @@ async fn a_stopped_sandbox_is_reattached_with_its_state() {
 async fn no_shim_survives_stop_or_rm() {
     let f = Fixture::new();
 
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
     f.sandboxes.stop(&f.workspace).await.unwrap();
     let after_stop = shims(&f.sandboxes.boxlite_home()).unwrap();
-    f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
     f.sandboxes.rm(&f.workspace).await.unwrap();
     let after_rm = shims(&f.sandboxes.boxlite_home()).unwrap();
 
@@ -169,11 +183,11 @@ fn shims(home: &Path) -> anyhow::Result<Vec<PathBuf>> {
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_removed_sandbox_is_created_afresh() {
     let f = Fixture::new();
-    let first = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let first = f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
     sh(&first.target, "echo gone > /root/state").await.unwrap();
 
     f.sandboxes.rm(&f.workspace).await.unwrap();
-    let again = f.sandboxes.up(&f.workspace, IMAGE).await.unwrap();
+    let again = f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
 
     assert!(again.created);
     let read = sh(&again.target, "test -e /root/state").await.unwrap();
@@ -201,9 +215,9 @@ async fn sandboxes_are_listed_by_workspace_path() {
     let mut f = Fixture::new();
     let (a, b) = (f.another_workspace(), f.another_workspace());
     let (running, stopped) = if a.path() < b.path() { (a, b) } else { (b, a) };
-    f.sandboxes.up(&stopped, IMAGE).await.unwrap();
+    f.sandboxes.up(&stopped, IMAGE, &f.auth).await.unwrap();
     f.sandboxes.stop(&stopped).await.unwrap();
-    f.sandboxes.up(&running, IMAGE).await.unwrap();
+    f.sandboxes.up(&running, IMAGE, &f.auth).await.unwrap();
     // A Box boxq has no record of, as if its record were lost.
     let options = BoxOptions {
         rootfs: RootfsSpec::Image(IMAGE.into()),
@@ -244,7 +258,7 @@ async fn up_waits_for_a_runtime_another_process_holds() {
         drop(held);
     });
 
-    let up = f.sandboxes.up(&f.workspace, IMAGE).await;
+    let up = f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await;
     release.join().unwrap();
 
     assert!(up.unwrap().created);
@@ -278,7 +292,7 @@ async fn git_works_in_a_worktrees_sandbox_as_on_the_host() {
     );
     let worktree = Workspace::resolve(&tmp.join("feature")).unwrap();
 
-    let up = f.sandboxes.up(&worktree, GIT_IMAGE).await.unwrap();
+    let up = f.sandboxes.up(&worktree, GIT_IMAGE, &f.auth).await.unwrap();
     let script = format!(
         "cd {} && echo hi > note && git add note && \
          git -c user.name=boxq -c user.email=boxq@example.com commit -qm 'from the Sandbox' && \
@@ -295,5 +309,100 @@ async fn git_works_in_a_worktrees_sandbox_as_on_the_host() {
     assert_eq!(
         std::fs::read_to_string(worktree.path().join("note")).unwrap(),
         "hi\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn the_guest_holds_only_the_placeholder_never_the_key() {
+    let f = Fixture::new();
+
+    let up = f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
+    let token = sh(&up.target, "printf %s \"$ANTHROPIC_AUTH_TOKEN\"")
+        .await
+        .unwrap();
+    // Every process's env and command line, and every file on the guest's own disk, read out
+    // to be searched here: searching in the guest would need the key in the guest.
+    let dump = sh(
+        &up.target,
+        "for p in /proc/[0-9]*; do cat $p/environ $p/cmdline; echo; done; cat /proc/cmdline; \
+         find / -xdev -type f -exec cat {} + ; true",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(token, ("<BOXLITE_SECRET:anthropic>".into(), 0));
+    assert!(
+        dump.0.contains("<BOXLITE_SECRET:anthropic>"),
+        "dump missed the env"
+    );
+    assert!(!dump.0.contains(FAKE_KEY), "the key is in the guest");
+}
+
+/// The Claude Code release the auth test installs, as the image will pin one.
+const CLAUDE_CODE: &str = "@anthropic-ai/claude-code@2.1.312";
+
+/// Needs a real base URL and key, so it reads them from `BOXQ_TEST_BASE_URL` and
+/// `BOXQ_TEST_API_KEY` and passes vacuously without them, as in CI.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn claude_code_authenticates_through_the_placeholder() {
+    let (Ok(base_url), Ok(key)) = (
+        std::env::var("BOXQ_TEST_BASE_URL"),
+        std::env::var("BOXQ_TEST_API_KEY"),
+    ) else {
+        eprintln!("skipped: set BOXQ_TEST_BASE_URL and BOXQ_TEST_API_KEY to run it");
+        return;
+    };
+    let f = Fixture::new();
+    let auth = Auth::new(&base_url, &key).unwrap();
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, NODE_IMAGE, &auth)
+        .await
+        .unwrap();
+    let install = sh(
+        &up.target,
+        &format!("npm install -g --no-fund --no-audit {CLAUDE_CODE} >&2"),
+    )
+    .await
+    .unwrap();
+    let asked = sh(
+        &up.target,
+        "claude -p 'Reply with the single word pong, in lower case.' 2>&1",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(install.1, 0, "npm install failed");
+    assert_eq!(asked.1, 0, "claude failed: {}", asked.0);
+    assert!(asked.0.to_lowercase().contains("pong"), "{}", asked.0);
+}
+
+/// BoxLite fixes a Box's secrets and env at creation, so a rotated key or a moved base URL
+/// reaches only a recreated Sandbox.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_sandbox_reports_when_it_was_created_with_other_auth() {
+    let f = Fixture::new();
+    let rotated = Auth::new("https://cliproxy.boxq.invalid", "boxq-rotated-key").unwrap();
+    let moved = Auth::new("https://moved.boxq.invalid", FAKE_KEY).unwrap();
+
+    let first = f.sandboxes.up(&f.workspace, IMAGE, &f.auth).await.unwrap();
+    let same = f
+        .sandboxes
+        .up(&f.workspace, IMAGE, &fake_auth())
+        .await
+        .unwrap();
+    let after_rotation = f.sandboxes.up(&f.workspace, IMAGE, &rotated).await.unwrap();
+    let after_move = f.sandboxes.up(&f.workspace, IMAGE, &moved).await.unwrap();
+    f.sandboxes.rm(&f.workspace).await.unwrap();
+    let recreated = f.sandboxes.up(&f.workspace, IMAGE, &rotated).await.unwrap();
+
+    let changed = |up: &boxq::sandbox::Up| up.auth_changed;
+    assert_eq!(
+        [&first, &same, &after_rotation, &after_move, &recreated].map(changed),
+        [false, false, true, true, false]
     );
 }

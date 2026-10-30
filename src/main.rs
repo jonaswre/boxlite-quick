@@ -1,4 +1,5 @@
 use boxq::Workspace;
+use boxq::auth::Auth;
 use boxq::config::Config;
 use boxq::sandbox::Sandboxes;
 use clap::{Parser, Subcommand};
@@ -48,14 +49,20 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Run(t) => {
             let ws = t.workspace()?;
-            Config::from_process_env(&ws)?;
-            let up = sandboxes.up(&ws, INTERIM_IMAGE).await?;
+            let auth = Auth::from_config(&Config::from_process_env(&ws)?)?;
+            let up = sandboxes.up(&ws, INTERIM_IMAGE, &auth).await?;
             let did = if up.created {
                 "Created"
             } else {
                 "Reattached to"
             };
             eprintln!("{did} the Sandbox for {}", ws.path().display());
+            if up.auth_changed {
+                eprintln!(
+                    "warning: the Sandbox still has the base URL and API key it was created \
+                     with; run `boxq rm` then `boxq run` to use the current ones"
+                );
+            }
         }
         Command::Shell(t) => {
             Config::from_process_env(&t.workspace()?)?;

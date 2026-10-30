@@ -2,6 +2,7 @@
 //! (jonaswre/boxlite-quick#10).
 
 use crate::Workspace;
+use crate::auth::Auth;
 use crate::reap::reap_box;
 use crate::runtime;
 use anyhow::Context;
@@ -20,6 +21,9 @@ pub struct Sandboxes {
 pub struct Up {
     /// Whether `up` created the Sandbox, rather than reattaching to it.
     pub created: bool,
+    /// Whether the Sandbox was created with another base URL or API key. A Box's secrets and
+    /// env are fixed at creation, so it keeps those until it is removed and created afresh.
+    pub auth_changed: bool,
     pub target: ExecTarget,
 }
 
@@ -91,13 +95,13 @@ impl Sandboxes {
         self.home.join("boxlite")
     }
 
-    /// Creates the Workspace's Sandbox from `image`, or reattaches to the one it has, and makes
-    /// sure it runs.
-    pub async fn up(&self, ws: &Workspace, image: &str) -> anyhow::Result<Up> {
+    /// Creates the Workspace's Sandbox from `image` with `auth`, or reattaches to the one it has,
+    /// and makes sure it runs.
+    pub async fn up(&self, ws: &Workspace, image: &str, auth: &Auth) -> anyhow::Result<Up> {
         // The record goes first, so a Box never exists without one.
         self.write_record(ws)?;
         let rt = runtime::open(&self.boxlite_home())?;
-        let options = BoxOptions {
+        let mut options = BoxOptions {
             rootfs: RootfsSpec::Image(image.into()),
             entrypoint: Some(vec![]),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
@@ -114,7 +118,9 @@ impl Sandboxes {
             detach: true,
             ..Default::default()
         };
+        auth.apply(&mut options);
         let (b, created) = rt.get_or_create(options, Some(ws.box_name())).await?;
+        let auth_changed = self.check_auth(ws, auth, created)?;
         if b.info().await?.status != BoxStatus::Running {
             // A VM leaked by an earlier stop must never share the disk with this one.
             reap_box(&self.boxlite_home(), b.id().as_ref())?;
@@ -123,6 +129,7 @@ impl Sandboxes {
         let box_dir = self.boxlite_home().join("boxes").join(b.id().as_ref());
         Ok(Up {
             created,
+            auth_changed,
             target: ExecTarget {
                 socket: box_dir.join("sockets/box.sock"),
                 container_id: container_id(&box_dir)?,
@@ -150,13 +157,18 @@ impl Sandboxes {
         };
         rt.remove(&ws.box_name(), true).await?;
         reap_box(&self.boxlite_home(), info.id.as_ref())?;
-        let record = self.record_path(&ws.box_name());
-        match std::fs::remove_file(&record) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Err(e).with_context(|| format!("cannot remove {}", record.display()))
+        for record in [
+            self.record_path(&ws.box_name()),
+            self.auth_path(&ws.box_name()),
+        ] {
+            match std::fs::remove_file(&record) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("cannot remove {}", record.display()));
+                }
+                _ => {}
             }
-            _ => Ok(()),
         }
+        Ok(())
     }
 
     /// Every Sandbox, ordered by Workspace path, with any whose record is lost last.
@@ -183,6 +195,27 @@ impl Sandboxes {
 
     fn record_path(&self, box_name: &str) -> PathBuf {
         self.home.join("sandboxes").join(format!("{box_name}.toml"))
+    }
+
+    fn auth_path(&self, box_name: &str) -> PathBuf {
+        self.home.join("sandboxes").join(format!("{box_name}.auth"))
+    }
+
+    /// Records the auth a new Sandbox was created with, or tells whether a reattached one's
+    /// differs from `auth`. A Sandbox with no auth record is reported changed, since its auth
+    /// is unknown.
+    fn check_auth(&self, ws: &Workspace, auth: &Auth, created: bool) -> anyhow::Result<bool> {
+        let path = self.auth_path(&ws.box_name());
+        if created {
+            std::fs::write(&path, auth.fingerprint())
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            return Ok(false);
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(fingerprint) => Ok(fingerprint != auth.fingerprint()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+        }
     }
 
     fn write_record(&self, ws: &Workspace) -> anyhow::Result<()> {
