@@ -57,11 +57,17 @@ impl Spec {
             [] => last.to_string(),
             rest => format!("{} and {last}", rest.join(", ")),
         };
-        let ws = workspace.display();
         Some(format!(
-            "The Sandbox for {ws} was created before its {names} changed in the config; to \
-             apply them, run `boxq rm {ws}` and then `boxq run {ws}`, which discards the \
-             Sandbox's state."
+            "The Sandbox for {} was created before its {names} changed in the config; to \
+             apply them, {}.",
+            workspace.display(),
+            recreate_hint(workspace)
         ))
     }
+}
+
+/// How to get the Sandbox for `workspace` created afresh, to take what it was created from.
+pub fn recreate_hint(workspace: &Path) -> String {
+    let ws = workspace.display();
+    format!("run `boxq rm {ws}` and then `boxq run {ws}`, which discards the Sandbox's state")
 }

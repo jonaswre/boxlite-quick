@@ -6,7 +6,7 @@ use boxq::config::Config;
 use boxq::egress::{Approvals, Policy};
 use boxq::sandbox::{NoSandbox, Sandboxes, Up};
 use boxq::session;
-use boxq::spec::Spec;
+use boxq::spec::{self, Spec};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -118,11 +118,11 @@ async fn up(sandboxes: &Sandboxes, ws: &Workspace) -> anyhow::Result<Up> {
         eprintln!("{warning}");
     }
     if up.auth_changed {
-        let ws = ws.path().display();
         eprintln!(
-            "The Sandbox for {ws} still has the base URL and API key it was created \
-             with; to use the current ones, run `boxq rm {ws}` and then `boxq run {ws}`, \
-             which discards the Sandbox's state."
+            "The Sandbox for {} still has the base URL and API key it was created with; to \
+             use the current ones, {}.",
+            ws.path().display(),
+            spec::recreate_hint(ws.path())
         );
     }
     Ok(up)
