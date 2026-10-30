@@ -404,6 +404,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "url",
 ]
 
 [[package]]

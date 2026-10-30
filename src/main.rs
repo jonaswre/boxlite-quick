@@ -1,5 +1,6 @@
 use boxq::Workspace;
 use boxq::config::Config;
+use boxq::egress::{Approvals, Policy};
 use boxq::sandbox::Sandboxes;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -48,8 +49,9 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Run(t) => {
             let ws = t.workspace()?;
-            Config::from_process_env(&ws)?;
-            let up = sandboxes.up(&ws, INTERIM_IMAGE).await?;
+            let config = Config::from_process_env(&ws)?;
+            let egress = Policy::from_process_env(&ws, &config)?;
+            let up = sandboxes.up(&ws, INTERIM_IMAGE, &egress).await?;
             let did = if up.created {
                 "Created"
             } else {
@@ -58,7 +60,9 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("{did} the Sandbox for {}", ws.path().display());
         }
         Command::Shell(t) => {
-            Config::from_process_env(&t.workspace()?)?;
+            let ws = t.workspace()?;
+            let config = Config::from_process_env(&ws)?;
+            Policy::from_process_env(&ws, &config)?;
             anyhow::bail!("`boxq shell` is not implemented yet");
         }
         Command::Ls => {
@@ -77,6 +81,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Rm(t) => {
             let ws = t.workspace()?;
+            // Forgotten even if there is no Sandbox, so `rm` always resets the Workspace.
+            Approvals::from_process_env()?.revoke(&ws)?;
             sandboxes.rm(&ws).await?;
             eprintln!("Removed the Sandbox for {}", ws.path().display());
         }

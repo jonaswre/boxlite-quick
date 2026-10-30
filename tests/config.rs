@@ -353,6 +353,57 @@ fn allow_entries_outside_boxlites_grammar_are_errors_naming_file_and_entry() {
     }
 }
 
+const OPENS_HOST_LOOPBACK: [&str; 5] = [
+    "192.168.127.254",
+    "192.168.0.0/16",
+    "127.0.0.1",
+    "127.0.0.0/8",
+    "0.0.0.0/0",
+];
+
+#[test]
+fn a_workspace_allow_entry_that_would_open_host_loopback_is_an_error() {
+    for entry in OPENS_HOST_LOOPBACK {
+        let host = Host::new();
+        host.write_global("[egress]\nallow_host_loopback = true");
+        let path = host.write_workspace(&format!("[egress]\nallow = [{entry:?}]"));
+
+        let err = format!("{:#}", host.load().unwrap_err());
+
+        assert!(err.contains(&*path.to_string_lossy()), "{entry}: {err}");
+        assert!(err.contains(&format!("{entry:?}")), "{entry}: {err}");
+        assert!(err.contains("host loopback"), "{entry}: {err}");
+    }
+}
+
+#[test]
+fn a_global_allow_entry_may_open_host_loopback_only_with_allow_host_loopback() {
+    for entry in OPENS_HOST_LOOPBACK {
+        let host = Host::new();
+        host.write_global(&format!("[egress]\nallow = [{entry:?}]"));
+        let err = format!("{:#}", host.load().unwrap_err());
+        assert!(err.contains("config.toml"), "{entry}: {err}");
+        assert!(err.contains("allow_host_loopback = true"), "{entry}: {err}");
+
+        host.write_global(&format!(
+            "[egress]\nallow = [{entry:?}]\nallow_host_loopback = true"
+        ));
+        assert!(host.load().is_ok(), "{entry}");
+    }
+}
+
+#[test]
+fn allow_entries_beside_host_loopback_are_accepted() {
+    let host = Host::new();
+    host.write_global(
+        r#"[egress]
+allow = ["192.168.127.253", "192.168.128.0/17", "0.0.0.0/2", "localhost"]"#,
+    );
+    host.write_workspace("[egress]\nallow = [\"10.0.0.0/8\"]");
+
+    assert!(host.load().is_ok());
+}
+
 #[test]
 fn global_allow_entries_are_validated_too() {
     let host = Host::new();
