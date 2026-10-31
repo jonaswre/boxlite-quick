@@ -46,7 +46,42 @@ impl Resources {
             disk: self.disk.or(base.disk),
         }
     }
+
+    /// Refuses resources no Sandbox could be created with. These are sanity limits, not a
+    /// trust gate, so a Workspace Config may set resources freely (jonaswre/boxlite-quick#31).
+    fn check(&self) -> anyhow::Result<()> {
+        if let Some(cpus) = self.cpus {
+            // The guest kernel's limit, which BoxLite otherwise checks only at creation.
+            anyhow::ensure!(
+                cpus.get() <= MAX_CPUS,
+                "cpus = {cpus} is more than the {MAX_CPUS} a Sandbox can have"
+            );
+        }
+        if let Some(memory) = self.memory {
+            let host_mib = host_ram_mib()?;
+            anyhow::ensure!(
+                memory.mib() <= host_mib,
+                "memory = {}MiB is more than the host's {host_mib}MiB of RAM",
+                memory.mib()
+            );
+        }
+        Ok(())
+    }
 }
+
+/// The host's total RAM, in whole MiB.
+fn host_ram_mib() -> anyhow::Result<u64> {
+    // SAFETY: an all-zero `sysinfo` is a valid value for sysinfo(2) to fill in.
+    let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a valid, writable `sysinfo`.
+    if unsafe { libc::sysinfo(&mut info) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("cannot read the host's RAM");
+    }
+    Ok(info.totalram * u64::from(info.mem_unit) / (1024 * 1024))
+}
+
+/// The most vCPUs a Sandbox can have: `boxlite` 0.11's `vm_defaults::MAX_CPUS`.
+const MAX_CPUS: u8 = 16;
 
 /// A size in whole MiB, written as a whole number of `MiB` or `GiB` (`"512MiB"`, `"8GiB"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -262,6 +297,11 @@ impl File {
                  IPv4 address or IPv4 CIDR, with no scheme or port",
                 path.display()
             );
+        }
+        if let Some(resources) = &file.resources {
+            resources
+                .check()
+                .with_context(|| format!("invalid {}", path.display()))?;
         }
         Ok(file)
     }

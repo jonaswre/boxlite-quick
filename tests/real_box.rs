@@ -30,7 +30,7 @@ const GIT_IMAGE: &str = "alpine/git:2.49.1";
 /// Alpine whose user is not root, for the tests that boxq runs as root whatever the image says.
 const NON_ROOT_IMAGE: &str = "haproxy:3.2-alpine";
 
-/// `image` with BoxLite's default resources.
+/// `image` with boxq's default resources.
 fn spec(image: &str) -> Spec {
     Spec {
         image: image.into(),
@@ -449,6 +449,44 @@ async fn a_new_sandbox_gets_the_configured_image_and_resources() {
     assert_eq!(git, "has-git");
 }
 
+/// The defaults fill in only the Box: the record keeps the Spec as configured, so a later
+/// change to a default never reads as a config change (jonaswre/boxlite-quick#31).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn a_sandbox_with_no_resources_configured_gets_boxqs_defaults() {
+    let f = Fixture::new();
+
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+    let (out, code) = sh(
+        &up.target,
+        "nproc; grep MemTotal /proc/meminfo | tr -dc 0-9; echo; df -k / | awk 'NR==2{print $2}'",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(code, 0, "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    let [cpus, mem_kib, disk_kib] = lines[..] else {
+        panic!("unexpected output: {out:?}");
+    };
+    let mib = |kib: &str| kib.parse::<u64>().unwrap() / 1024;
+    assert_eq!(cpus, "4");
+    // The guest kernel keeps some memory for itself.
+    assert!(
+        (7 * 1024..=8 * 1024).contains(&mib(mem_kib)),
+        "MemTotal {mem_kib} KiB"
+    );
+    assert!(
+        (30 * 1024..=32 * 1024).contains(&mib(disk_kib)),
+        "disk {disk_kib} KiB"
+    );
+    assert_eq!(up.as_created, Some(spec(IMAGE)));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_sandbox_keeps_the_spec_it_was_created_with_until_removed() {
@@ -486,7 +524,7 @@ async fn a_sandbox_keeps_the_spec_it_was_created_with_until_removed() {
     assert_eq!(created.as_created, Some(first.clone()));
     assert_eq!(running.as_created, Some(first.clone()));
     assert_eq!(restarted.as_created, Some(first));
-    assert_eq!(nproc, "1\n");
+    assert_eq!(nproc, "4\n");
     assert_eq!(recreated.as_created, Some(changed));
 }
 

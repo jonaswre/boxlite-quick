@@ -2,7 +2,7 @@ use boxq::config::{Resources, Size};
 use boxq::spec::{Spec, mismatch_warning};
 
 #[test]
-fn with_nothing_configured_a_sandbox_gets_the_pinned_base_image_and_boxlites_defaults() {
+fn with_nothing_configured_a_sandbox_gets_the_pinned_base_image_and_no_resources_set() {
     let spec = Spec::new(None, &Resources::default()).unwrap();
 
     // Pinned by digest, so a cached copy is used with no registry round trip, and a pushed tag
