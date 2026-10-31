@@ -33,7 +33,7 @@ When you change the CLI, also run `cargo test --locked --test cli -- --ignored`,
 
 ## The Base Image tests
 
-Skip `base_image::` locally unless your change touches the image (`image/`, `spec::BASE_IMAGE`) or how Claude Code is launched (`src/claude.rs`, `src/claude_config.rs`). Each of its two tests takes about 3 minutes, mostly re-downloading the 581 MB Base Image. Without them the whole suite takes about 70 s: `scripts/real-box --skip base_image::`. When you do need them, `scripts/real-box base_image::` runs them alone.
+Skip `base_image::` locally unless your change touches the image (`image/`, `spec::BASE_IMAGE`) or how Claude Code is launched (`src/claude.rs`, `src/claude_config.rs`). Each of its two tests takes about 3 minutes, mostly re-downloading the 581 MB Base Image. Without them the whole suite took 30–70 s on a 16-core host: `scripts/real-box --skip base_image::`. When you do need them, `scripts/real-box base_image::` runs them alone.
 
 ## CI
 
