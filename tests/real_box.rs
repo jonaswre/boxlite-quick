@@ -21,14 +21,17 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
+// Docker Hub images come through Google's mirror: every test pulls into a fresh home, and a run
+// pulls more than Docker Hub's anonymous limit allows (jonaswre/boxlite-quick#43).
+
 /// Small and quick to pull; boxq's real image only matters to the Agent.
-const IMAGE: &str = "alpine:3";
+const IMAGE: &str = "mirror.gcr.io/library/alpine:3";
 
 /// Alpine with git, for the tests that run git in a Sandbox.
-const GIT_IMAGE: &str = "alpine/git:2.49.1";
+const GIT_IMAGE: &str = "mirror.gcr.io/alpine/git:2.49.1";
 
 /// Alpine whose user is not root, for the tests that boxq runs as root whatever the image says.
-const NON_ROOT_IMAGE: &str = "haproxy:3.2-alpine";
+const NON_ROOT_IMAGE: &str = "mirror.gcr.io/library/haproxy:3.2-alpine";
 
 /// `image` with boxq's default resources.
 fn spec(image: &str) -> Spec {
