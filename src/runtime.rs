@@ -1,3 +1,4 @@
+use anyhow::Context;
 use boxlite::runtime::options::BoxliteOptions;
 use boxlite::{BoxliteError, BoxliteRuntime};
 use std::path::Path;
@@ -29,7 +30,11 @@ pub fn open(home: &Path) -> anyhow::Result<BoxliteRuntime> {
                 }
                 std::thread::sleep(POLL);
             }
-            opened => return Ok(opened?),
+            opened => {
+                return opened.with_context(|| {
+                    format!("cannot open BoxLite's runtime in {}", home.display())
+                });
+            }
         }
     }
 }
