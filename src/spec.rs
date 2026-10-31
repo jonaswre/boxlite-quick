@@ -5,9 +5,10 @@ use crate::config::Resources;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// The image a Sandbox is created from when the config sets none, until the base image leaves
-/// the map's fog.
-const INTERIM_IMAGE: &str = "node:22-bookworm";
+/// boxq's Base Image, which a Sandbox is created from when the config sets none. Pinned by
+/// digest, so a cached copy is used with no registry round trip; bumped by hand to a build the
+/// image workflow published (jonaswre/boxlite-quick#29).
+pub const BASE_IMAGE: &str = "ghcr.io/jonaswre/boxq:2.1.312-247cf26@sha256:55a29d246f63c1788b39fec42d4067c11decb5a8843200566abc07abf3165709";
 
 /// What a Sandbox gets for a resource no config sets (jonaswre/boxlite-quick#31). Filled in only
 /// when the Box is built, so changing one never makes an existing Sandbox look out of date.
@@ -37,7 +38,7 @@ impl Spec {
             })
             .transpose()?;
         Ok(Self {
-            image: image.unwrap_or(INTERIM_IMAGE).into(),
+            image: image.unwrap_or(BASE_IMAGE).into(),
             cpus: resources.cpus.map(|n| n.get()),
             memory_mib,
             // BoxLite sizes a disk in whole GiB; rounding up never gives less than asked for.

@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("{failed}");
                 std::process::exit(failed.status);
             }
-            claude::ensure_installed(&sandbox.target).await?;
+            claude::check_installed(&sandbox.target, &ws).await?;
             claude_config.sync(&ws, &sandbox.target).await?;
             let status = session::interactive(&sandbox.target, &ws, session::CLAUDE).await?;
             std::process::exit(status);

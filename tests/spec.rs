@@ -2,17 +2,33 @@ use boxq::config::{Resources, Size};
 use boxq::spec::{Spec, mismatch_warning};
 
 #[test]
-fn with_nothing_configured_a_sandbox_gets_the_interim_image_and_no_resources_set() {
+fn with_nothing_configured_a_sandbox_gets_the_pinned_base_image_and_no_resources_set() {
     let spec = Spec::new(None, &Resources::default()).unwrap();
 
+    // Pinned by digest, so a cached copy is used with no registry round trip, and a pushed tag
+    // can't change what a new Sandbox gets.
+    let (tag, digest) = spec.image.split_once('@').unwrap();
+    let hex = |s: &str, len| s.len() == len && s.chars().all(|c| c.is_ascii_hexdigit());
+    // The image workflow tags a build `<claude-version>-<short sha>`.
+    let (claude_version, sha) = tag
+        .strip_prefix("ghcr.io/jonaswre/boxq:")
+        .and_then(|t| t.rsplit_once('-'))
+        .unwrap_or_else(|| panic!("{}", spec.image));
+    assert!(
+        claude_version.split('.').count() == 3
+            && claude_version.split('.').all(|n| n.parse::<u32>().is_ok()),
+        "{}",
+        spec.image
+    );
+    assert!(hex(sha, 7), "{}", spec.image);
+    assert!(
+        digest.strip_prefix("sha256:").is_some_and(|d| hex(d, 64)),
+        "{}",
+        spec.image
+    );
     assert_eq!(
-        spec,
-        Spec {
-            image: "node:22-bookworm".into(),
-            cpus: None,
-            memory_mib: None,
-            disk_gib: None,
-        }
+        (spec.cpus, spec.memory_mib, spec.disk_gib),
+        (None, None, None)
     );
 }
 
@@ -66,7 +82,7 @@ fn memory_beyond_what_boxlite_takes_is_an_error_naming_it() {
     assert!(err.to_string().contains("4294967296MiB"), "{err}");
 }
 
-fn interim() -> Spec {
+fn defaulted() -> Spec {
     Spec::new(None, &Resources::default()).unwrap()
 }
 
@@ -74,18 +90,21 @@ fn interim() -> Spec {
 fn a_sandbox_created_as_configured_gets_no_warning() {
     let ws = std::path::Path::new("/home/me/project");
 
-    assert_eq!(mismatch_warning(ws, &interim().changes(&interim())), None);
+    assert_eq!(
+        mismatch_warning(ws, &defaulted().changes(&defaulted())),
+        None
+    );
 }
 
 #[test]
 fn a_changed_config_warns_in_one_line_naming_the_changes_and_the_fix() {
     let ws = std::path::Path::new("/home/me/project");
-    let created = interim();
+    let created = defaulted();
     let config = Spec {
         image: "alpine:3".into(),
         memory_mib: Some(2048),
         disk_gib: Some(20),
-        ..interim()
+        ..defaulted()
     };
 
     let warning = mismatch_warning(ws, &config.changes(&created)).unwrap();
@@ -103,10 +122,10 @@ fn a_single_change_is_named_alone() {
     let ws = std::path::Path::new("/w");
     let config = Spec {
         cpus: Some(4),
-        ..interim()
+        ..defaulted()
     };
 
-    let warning = mismatch_warning(ws, &config.changes(&interim())).unwrap();
+    let warning = mismatch_warning(ws, &config.changes(&defaulted())).unwrap();
 
     assert!(
         warning.starts_with("The Sandbox for /w was created before its cpus changed in"),
@@ -120,9 +139,9 @@ fn changes_beyond_the_spec_are_named_in_the_same_line() {
     let ws = std::path::Path::new("/w");
     let config = Spec {
         image: "alpine:3".into(),
-        ..interim()
+        ..defaulted()
     };
-    let mut changed = config.changes(&interim());
+    let mut changed = config.changes(&defaulted());
     changed.push("Workspace Setup Hook");
 
     let warning = mismatch_warning(ws, &changed).unwrap();
