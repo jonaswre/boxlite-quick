@@ -38,10 +38,14 @@ fn by_default_the_policy_is_the_agents_entries_and_the_builtins() {
             "*.githubusercontent.com",
             "api.anthropic.com",
             "crates.io",
+            "deb.debian.org",
             "files.pythonhosted.org",
             "github.com",
             "pypi.org",
             "registry.npmjs.org",
+            "security.debian.org",
+            "sh.rustup.rs",
+            "static.rust-lang.org",
         ]
     );
 }

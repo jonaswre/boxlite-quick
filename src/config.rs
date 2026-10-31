@@ -16,9 +16,16 @@ pub struct Config {
     pub base_url: Option<BaseUrl>,
     pub api_key: Option<ApiKey>,
     pub image: Option<String>,
-    pub setup: Option<String>,
+    pub setup: SetupHooks,
     pub resources: Resources,
     pub egress: Egress,
+}
+
+/// The Setup Hooks, kept apart because both run, the Global Config's first.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SetupHooks {
+    pub global: Option<String>,
+    pub workspace: Option<String>,
 }
 
 /// Sandbox resources. `None` leaves the choice to boxq's defaults.
@@ -214,7 +221,10 @@ impl Config {
                 .transpose()?,
             api_key: env("BOXQ_API_KEY").or(credentials.api_key).map(ApiKey),
             image: ws.image.or(global.image),
-            setup: ws.setup.or(global.setup),
+            setup: SetupHooks {
+                global: global.setup,
+                workspace: ws.setup,
+            },
             resources: ws
                 .resources
                 .unwrap_or_default()

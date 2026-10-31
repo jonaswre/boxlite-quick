@@ -10,6 +10,7 @@ pub mod reap;
 pub mod runtime;
 pub mod sandbox;
 pub mod session;
+pub mod setup;
 pub mod spec;
 mod workspace;
 

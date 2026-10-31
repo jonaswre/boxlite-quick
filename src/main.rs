@@ -6,6 +6,7 @@ use boxq::config::Config;
 use boxq::egress::{Approvals, Policy};
 use boxq::sandbox::{NoSandbox, Sandboxes, Up};
 use boxq::session;
+use boxq::setup::{self, Failed};
 use boxq::spec::{self, Spec};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -51,7 +52,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(t) => {
             let ws = t.workspace()?;
             let claude_config = ClaudeConfig::from_process_env()?;
-            let sandbox = ready_sandbox(&sandboxes, &ws).await?;
+            let (sandbox, failed) = ready_sandbox(&sandboxes, &ws).await?;
+            if let Some(failed) = failed {
+                eprintln!("{failed}");
+                std::process::exit(failed.status);
+            }
             claude::ensure_installed(&sandbox.target).await?;
             claude_config.sync(&ws, &sandbox.target).await?;
             let status = session::interactive(&sandbox.target, &ws, session::CLAUDE).await?;
@@ -59,7 +64,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Shell(t) => {
             let ws = t.workspace()?;
-            let sandbox = ready_sandbox(&sandboxes, &ws).await?;
+            let (sandbox, failed) = ready_sandbox(&sandboxes, &ws).await?;
+            if let Some(failed) = failed {
+                eprintln!("{failed}");
+                // A signal means stop boxq, not open a shell.
+                if failed.interrupted {
+                    std::process::exit(failed.status);
+                }
+                eprintln!("Opening the shell anyway, so it can be debugged.");
+            }
             let status = session::interactive(&sandbox.target, &ws, session::LOGIN_SHELL).await?;
             std::process::exit(status);
         }
@@ -97,8 +110,12 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Creates the Workspace's Sandbox from the config, or reattaches to it, saying which and
-/// warning where the Sandbox no longer matches the config.
-async fn ready_sandbox(sandboxes: &Sandboxes, ws: &Workspace) -> anyhow::Result<Up> {
+/// warning where the Sandbox no longer matches the config, then runs any Setup Hook that hasn't
+/// succeeded, returning the one that failed.
+async fn ready_sandbox(
+    sandboxes: &Sandboxes,
+    ws: &Workspace,
+) -> anyhow::Result<(Up, Option<Failed>)> {
     let config = Config::from_process_env(ws)?;
     let auth = Auth::from_config(&config)?;
     let spec = Spec::new(config.image.as_deref(), &config.resources)?;
@@ -110,11 +127,11 @@ async fn ready_sandbox(sandboxes: &Sandboxes, ws: &Workspace) -> anyhow::Result<
         "Reattached to"
     };
     eprintln!("{action} the Sandbox for {}", ws.path().display());
-    let warning = up
-        .as_created
-        .as_ref()
-        .and_then(|c| spec.mismatch_warning(c, ws.path()));
-    if let Some(warning) = warning {
+    let mut changed = up.as_created.as_ref().map_or(vec![], |c| spec.changes(c));
+    if let Some(setup) = &up.setup {
+        changed.extend(setup.changes(&config.setup));
+    }
+    if let Some(warning) = spec::mismatch_warning(ws.path(), &changed) {
         eprintln!("{warning}");
     }
     if up.auth_changed {
@@ -125,5 +142,6 @@ async fn ready_sandbox(sandboxes: &Sandboxes, ws: &Workspace) -> anyhow::Result<
             spec::recreate_hint(ws.path())
         );
     }
-    Ok(up)
+    let failed = setup::run(sandboxes, ws, &up, &config.setup).await?;
+    Ok((up, failed))
 }
