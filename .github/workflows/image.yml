@@ -90,7 +90,7 @@ jobs:
           BOXQ_TEST_IMAGE: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
         run: |
           cargo test --locked --test real_box -- --ignored --exact \
-            claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts
+            base_image::claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts
 
       # The manifest is put back under the tag byte for byte, so the tag keeps the tested digest.
       - name: Tag the tested build
