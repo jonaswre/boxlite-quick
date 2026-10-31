@@ -16,7 +16,11 @@ log=$log_dir/$(date +%Y%m%d-%H%M%S).log
 
 # The tests' homes go in a directory of this run's own, so whatever a stopped test left behind
 # can be found and removed. The kernel names an executable by its canonical path.
-run_dir=$(realpath "$(mktemp -d "${TMPDIR:-/tmp}/real-box.XXXXXX")")
+# Without it, `reap` would match every process, so the run stops here.
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/real-box.XXXXXX") && run_dir=$(realpath "$run_dir") || {
+  echo "real-box: cannot create a directory for the run under ${TMPDIR:-/tmp}" >&2
+  exit 1
+}
 export TMPDIR=$run_dir
 trap 'reap; rm -rf "$run_dir"' EXIT
 

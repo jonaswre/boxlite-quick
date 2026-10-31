@@ -45,11 +45,11 @@ impl StubCargo {
         );
         Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/real-box"))
             .args(args)
-            .envs(env.iter().copied())
             .env("PATH", path)
             .env("TMPDIR", self.tmp.path().join("tmp"))
             .env("CARGO_TARGET_DIR", self.tmp.path().join("target"))
             .env("REAL_BOX_TIME_LIMIT", limit.to_string())
+            .envs(env.iter().copied())
             .output()
             .unwrap()
     }
@@ -82,6 +82,20 @@ fn a_passing_run_saves_its_output_to_a_log_and_leaves_no_temporary_files() {
     assert!(log.contains("--ignored egress::"), "{log}");
     assert_eq!(cargo.temporary_files(), 0);
     assert!(stderr(&out).contains("passed"), "{}", stderr(&out));
+}
+
+#[test]
+fn a_run_that_cannot_create_its_directory_stops_before_the_build() {
+    let cargo = StubCargo::new("echo build ran >&2", "echo tests ran >&2");
+    let missing = cargo.tmp.path().join("missing");
+    let out = cargo.run_with(60, &[], &[("TMPDIR", missing.as_os_str())]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains("cannot create a directory for the run"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("ran"), "{}", stderr(&out));
 }
 
 #[test]
