@@ -28,12 +28,17 @@ Run the groups your change touches. Each group is one module in `tests/real_box/
 | `claude::` | `src/claude.rs`, `boxq run` |
 | `setup::` | `src/setup.rs` |
 | `base_image::` | `image/`, `spec::BASE_IMAGE` (see below) |
+| `fixture::` | the tests' own `Fixture` and its shared images (see below) |
 
 When you change the CLI, also run `cargo test --locked --test cli -- --ignored`, which takes a few seconds.
 
+## Images
+
+A run downloads each image once and shares it among the tests' BoxLite homes (`Fixture::new`). Each home still builds its own image disk. The small images are pulled at the start, in a few seconds. The 581 MB Base Image is pulled only once a test asks for `claude_image()`. A test that must pull into an empty home, as a first `boxq run` does, uses `Fixture::cold()`. `fixture::` tests the sharing itself.
+
 ## The Base Image tests
 
-Skip `base_image::` locally unless your change touches the image (`image/`, `spec::BASE_IMAGE`) or how Claude Code is launched (`src/claude.rs`, `src/claude_config.rs`). Each of its two tests takes about 3 minutes, mostly re-downloading the 581 MB Base Image. Without them the whole suite took 30–70 s on a 16-core host: `scripts/real-box --skip base_image::`. When you do need them, `scripts/real-box base_image::` runs them alone.
+Each of the two `base_image::` tests takes about 2 minutes. The cold-start one downloads the Base Image itself, and the other waits for the run's shared copy. Both then unpack it and build a disk from it. Together they take a full run on a 16-core host from about 30 s to about 2 minutes, well within the time limit. So run the whole suite when your change touches the image (`image/`, `spec::BASE_IMAGE`) or how Claude Code is launched (`src/claude.rs`, `src/claude_config.rs`). Otherwise `scripts/real-box --skip base_image::` saves those 2 minutes. `scripts/real-box base_image::` runs them alone.
 
 ## CI
 
