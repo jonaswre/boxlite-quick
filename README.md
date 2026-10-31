@@ -113,7 +113,19 @@ Each command takes a Workspace path, which defaults to the current directory. A 
 
 The Sandbox keeps running after a `run` or `shell` session ends, so the next one starts fast. Several Sandboxes, and `shell` next to `run` in the same one, can run at once. When two boxq commands both need BoxLite's runtime, the second prints `Waiting for another boxq command to finish...` for a few seconds at most.
 
-Until boxq's Base Image ships, a Sandbox is created from `node:22-bookworm`, and the first `run` installs Claude Code 2.1.312 in it.
+## The Base Image
+
+Unless the config sets `image`, a new Sandbox is created from boxq's Base Image, `ghcr.io/jonaswre/boxq`, pinned by digest in `src/spec.rs`. Because of the digest, a copy already pulled is used with no registry round trip, and pushing to a tag can't change what a new Sandbox gets. The first `boxq run` on a host pulls the image, which takes a few minutes.
+
+The image is `node:22-bookworm` with Claude Code preinstalled at a pinned release, plus git, gh, ripgrep, fd, jq, python3, uv, unzip, less, procps and vim-tiny. It holds no boxq config. Language toolchains go in Setup Hooks.
+
+boxq never installs Claude Code itself. Any image you configure must have `claude` on its PATH. If it doesn't, `boxq run` fails and says so; to switch the image, `boxq rm` the Sandbox and run again.
+
+### Building and bumping it
+
+`image/Dockerfile` sets the Claude Code release with `ARG CLAUDE_CODE_VERSION`. The `Base Image` workflow builds `linux/amd64` on `main` when `image/` changes, or on manual dispatch. It boots a real Box from that exact build and checks that Claude Code starts with no prompts. Only if that passes does it tag the build `ghcr.io/jonaswre/boxq:<claude-version>-<short sha>`. The job summary then shows the `tag@digest` ref. Bumping the image is a manual step: paste that ref into `BASE_IMAGE` in `src/spec.rs`.
+
+A Sandbox keeps the image it was created with. After a bump, `boxq rm` a Sandbox to recreate it from the new image. That discards the Sandbox's state.
 
 ## Configuration
 
@@ -123,13 +135,13 @@ boxq reads three TOML files. Each is optional.
 
 ```toml
 base_url = "https://cliproxy.example.ts.net"   # https only, with no port and no credentials
-image = "node:22-bookworm"                     # what a new Sandbox is created from
+image = "ghcr.io/you/agent-image:1"            # instead of the Base Image; needs `claude` on its PATH
 setup = "apt-get update && apt-get install -y ripgrep"   # the Global Setup Hook
 
-[resources]                                    # unset ones use BoxLite's defaults
-cpus = 4
-memory = "8GiB"                                # whole MiB or GiB
-disk = "32GiB"                                 # rounded up to whole GiB
+[resources]                                    # see Resources below
+cpus = 8
+memory = "16GiB"
+disk = "64GiB"
 
 [egress]
 builtins = true                                # the built-in allowlist below
@@ -161,6 +173,24 @@ api_key = "sk-…"
 | `CLAUDE_CONFIG_DIR` | Where the host's Claude config is read from, as for Claude Code itself. |
 
 boxq never reads the host's `ANTHROPIC_*` variables, so a Sandbox never picks up a key meant for something else.
+
+### Resources
+
+A Sandbox's CPUs, memory and disk come from `[resources]` in the Global Config or the Workspace Config; the Workspace Config wins field by field.
+
+```toml
+[resources]
+cpus = 8          # 1–16
+memory = "16GiB"  # whole MiB or GiB, at most the host's total RAM
+disk = "64GiB"    # whole MiB or GiB, rounded up to a whole GiB
+```
+
+Anything neither file sets gets boxq's default: **4 vCPUs, 8 GiB memory, 32 GiB disk**.
+
+- The disk is sparse, so it uses host space only as the Sandbox writes to it. It is sized once, when the Sandbox is created, and never grows.
+- Memory isn't handed back to the host while the Sandbox runs; `boxq stop` frees it.
+- Resources are fixed when the Sandbox is created. After changing them in a config, boxq prints the `boxq rm` then `boxq run` command that applies them (this discards the Sandbox's state). A change to boxq's own defaults doesn't affect existing Sandboxes. Sandboxes created before boxq had defaults keep 1 vCPU and 1 GiB until you recreate them.
+- A config that sets `cpus` outside 1–16 or `memory` above the host's RAM is refused when it loads, with an error naming the file.
 
 ### What a Sandbox keeps from its creation
 
@@ -199,8 +229,7 @@ MCP servers run inside the Sandbox. Two things to know:
 A Sandbox reaches only what its Egress Policy allows. It always allows:
 
 - `api.anthropic.com`;
-- the base URL's host and, where it resolves, its IPv4 address;
-- `registry.npmjs.org`, while boxq installs Claude Code itself.
+- the base URL's host and, where it resolves, its IPv4 address.
 
 Unless the Global Config sets `builtins = false`, it also allows: `github.com`, `*.github.com`, `*.githubusercontent.com`, `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`, `crates.io`, `*.crates.io`, apt's `deb.debian.org` and `security.debian.org`, and rustup's `static.rust-lang.org` and `sh.rustup.rs`.
 
