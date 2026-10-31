@@ -14,6 +14,7 @@ mod base_image;
 mod claude;
 mod claude_config;
 mod egress;
+mod fixture;
 mod lifecycle;
 mod mounts;
 mod session;
@@ -32,10 +33,12 @@ use boxq::sandbox::{ExecTarget, Sandboxes};
 use boxq::spec::Spec;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tokio_util::sync::CancellationToken;
 
-// Docker Hub images come through Google's mirror: every test pulls into a fresh home, and a run
-// pulls more than Docker Hub's anonymous limit allows (jonaswre/boxlite-quick#43).
+// Docker Hub images come through Google's mirror: every home asks the registry for each tag it
+// uses, which in one run is more often than Docker Hub's anonymous limit allows
+// (jonaswre/boxlite-quick#43).
 
 /// Small and quick to pull; boxq's real image only matters to the Agent.
 const IMAGE: &str = "mirror.gcr.io/library/alpine:3";
@@ -57,9 +60,17 @@ fn spec(image: &str) -> Spec {
 }
 
 /// The image the Claude Code tests run in: boxq's Base Image, or `BOXQ_TEST_IMAGE`, which the
-/// image workflow sets to the build it is about to publish.
+/// image workflow sets to the build it is about to publish. It's pulled into [`IMAGE_STORE`]
+/// when a test first asks for it, so a fixture's Box downloads none of it, and a run without
+/// these tests downloads none of its 581 MB.
 fn claude_image() -> String {
-    std::env::var("BOXQ_TEST_IMAGE").unwrap_or_else(|_| boxq::spec::BASE_IMAGE.into())
+    static PULLED: LazyLock<String> = LazyLock::new(|| {
+        let image =
+            std::env::var("BOXQ_TEST_IMAGE").unwrap_or_else(|_| boxq::spec::BASE_IMAGE.into());
+        pull_into_store(&IMAGE_STORE.join("claude"), &[&image]);
+        image
+    });
+    PULLED.clone()
 }
 
 /// A key no test sends anywhere real, distinctive enough to grep a guest for.
@@ -83,7 +94,17 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// A fixture whose BoxLite home shares [`IMAGE_STORE`], so its Boxes download no image the
+    /// run has downloaded before.
     fn new() -> Self {
+        let f = Self::cold();
+        share_images(&f.sandboxes.boxlite_home());
+        f
+    }
+
+    /// A fixture whose BoxLite home starts empty, as on a first run, so its Boxes pull their
+    /// images from the registry.
+    fn cold() -> Self {
         let home = tempfile::tempdir().unwrap();
         let mut f = Self {
             sandboxes: Sandboxes::new(home.path()),
@@ -131,6 +152,78 @@ impl Drop for Fixture {
         std::thread::scope(|s| {
             s.spawn(|| tokio::runtime::Runtime::new().unwrap().block_on(clean_up));
         });
+    }
+}
+
+/// The BoxLite image directories homes share through [`IMAGE_STORE`]: downloaded blobs and
+/// unpacked layers. BoxLite writes these to a temp name and renames them, so homes can share
+/// them. `disk-images` is not shared: two homes building one image's disk there at once can
+/// swap the file a running Box boots from.
+const SHARED_IMAGE_DIRS: [&str; 4] = ["layers", "manifests", "configs", "extracted"];
+
+/// Where a run's homes share their [`SHARED_IMAGE_DIRS`], so the run downloads each image once
+/// rather than once per home (jonaswre/boxlite-quick#44). It's removed when the tests exit.
+static IMAGE_STORE: LazyLock<PathBuf> = LazyLock::new(|| {
+    let store = tempfile::tempdir().unwrap().keep();
+    extern "C" fn remove_store() {
+        let _ = std::fs::remove_dir_all(&*IMAGE_STORE);
+    }
+    // SAFETY: `remove_store` is a plain function that is safe to run at exit.
+    unsafe { libc::atexit(remove_store) };
+    for dir in SHARED_IMAGE_DIRS {
+        std::fs::create_dir_all(store.join(dir)).unwrap();
+    }
+    store
+});
+
+/// A BoxLite home that has pulled the small images most tests use into [`IMAGE_STORE`]. A
+/// fixture's home starts with a copy of its image index, so a Box finds them without asking the
+/// registry for a digest, and falls back to them if the registry turns it away.
+static INDEXED_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
+    let home = IMAGE_STORE.join("indexed");
+    pull_into_store(&home, &[IMAGE, GIT_IMAGE, NON_ROOT_IMAGE]);
+    home
+});
+
+/// Pulls `images` into [`IMAGE_STORE`] through a BoxLite home of their own at `home`.
+fn pull_into_store(home: &Path, images: &[&str]) {
+    link_image_dirs(home);
+    let pull = async {
+        let rt = BoxliteRuntime::new(BoxliteOptions {
+            home_dir: home.into(),
+            ..Default::default()
+        })
+        .unwrap();
+        for &image in images {
+            rt.images().unwrap().pull(image).await.unwrap();
+        }
+    };
+    // The first test to ask runs in its own tokio runtime, which can't be blocked on. The runtime
+    // here is dropped once the thread ends, closing the home's database for fixtures to copy.
+    std::thread::scope(|s| {
+        s.spawn(|| tokio::runtime::Runtime::new().unwrap().block_on(pull));
+    });
+}
+
+/// Points the BoxLite home `home`'s [`SHARED_IMAGE_DIRS`] at [`IMAGE_STORE`]'s, before any
+/// runtime opens it. This leans on how BoxLite lays out its home, so any BoxLite bump must pass
+/// these tests.
+fn link_image_dirs(home: &Path) {
+    std::fs::create_dir_all(home.join("images")).unwrap();
+    for dir in SHARED_IMAGE_DIRS {
+        std::os::unix::fs::symlink(IMAGE_STORE.join(dir), home.join("images").join(dir)).unwrap();
+    }
+}
+
+/// Gives the BoxLite home `home` the run's images: [`IMAGE_STORE`]'s, with a copy of
+/// [`INDEXED_HOME`]'s database, which holds the image index.
+fn share_images(home: &Path) {
+    let indexed = INDEXED_HOME.join("db");
+    link_image_dirs(home);
+    std::fs::create_dir_all(home.join("db")).unwrap();
+    for file in std::fs::read_dir(indexed).unwrap() {
+        let file = file.unwrap();
+        std::fs::copy(file.path(), home.join("db").join(file.file_name())).unwrap();
     }
 }
 

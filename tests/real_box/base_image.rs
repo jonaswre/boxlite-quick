@@ -1,6 +1,6 @@
 //! Claude Code in boxq's Base Image: `image/`, `spec::BASE_IMAGE` and the config keys
-//! `src/claude_config.rs` seeds. Both tests pull the Base Image, so each takes minutes and needs
-//! internet access.
+//! `src/claude_config.rs` seeds. Both tests unpack the Base Image and build a disk from it, so
+//! each takes minutes and needs internet access.
 
 use super::*;
 
@@ -105,11 +105,12 @@ async fn claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts
     }
 }
 
-/// Pulls boxq's Base Image, so it is slow and needs the network.
+/// Pulls boxq's Base Image into an empty home, as a first run does, so it is slow and needs the
+/// network.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "boots a real Box; needs KVM and internet access"]
 async fn run_on_a_fresh_workspace_starts_claude_code_from_the_pinned_base_image() {
-    let f = Fixture::new();
+    let f = Fixture::cold();
     let ws = f.workspace.path().to_str().unwrap();
 
     let mut run = Terminal::boxq(&f, &["run", ws]);
