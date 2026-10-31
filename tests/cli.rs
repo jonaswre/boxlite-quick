@@ -69,7 +69,11 @@ exit 1
 fn a_sandbox_that_cannot_start_names_the_step_and_prints_boxlites_report() {
     let host = Host::new();
     let ws = host.ws.path().to_str().unwrap();
-    std::fs::write(host.ws.path().join(".boxq.toml"), "image = \"alpine:3\"\n").unwrap();
+    std::fs::write(
+        host.ws.path().join(".boxq.toml"),
+        "image = \"mirror.gcr.io/library/alpine:3\"\n",
+    )
+    .unwrap();
     let bin = host.tmp.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let bwrap = bin.join("bwrap");
