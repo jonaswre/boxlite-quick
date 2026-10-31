@@ -12,9 +12,9 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
-/// What the Agent needs whatever the Global Config says. `registry.npmjs.org` serves the
-/// interim install of Claude Code (`crate::claude`), and goes once the base image ships it.
-const AGENT: &[&str] = &["api.anthropic.com", "registry.npmjs.org"];
+/// What the Agent needs whatever the Global Config says. The Base Image ships Claude Code, so
+/// no registry is needed to install it.
+const AGENT: &[&str] = &["api.anthropic.com"];
 
 /// The forge and registries a Sandbox reaches unless the Global Config sets `builtins = false`.
 /// With its nonessential traffic off, Claude Code itself needs only `registry.npmjs.org` (`npx`

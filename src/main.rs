@@ -9,7 +9,10 @@ use boxq::session;
 use boxq::setup::{self, Failed};
 use boxq::spec::{self, Spec};
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 /// Run Claude Code against a Workspace inside an isolated Sandbox.
 #[derive(Parser)]
@@ -47,6 +50,7 @@ impl Target {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    log_to_stderr();
     let sandboxes = Sandboxes::from_process_env()?;
     match Cli::parse().command {
         Command::Run(t) => {
@@ -57,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("{failed}");
                 std::process::exit(failed.status);
             }
-            claude::ensure_installed(&sandbox.target).await?;
+            claude::check_installed(&sandbox.target, &ws).await?;
             claude_config.sync(&ws, &sandbox.target).await?;
             let status = session::interactive(&sandbox.target, &ws, session::CLAUDE).await?;
             std::process::exit(status);
@@ -107,6 +111,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Prints BoxLite's `error` events on stderr, or what `BOXQ_LOG` (an `EnvFilter`) selects. BoxLite
+/// returns only a short sentence for a host failure and logs the full report, with its paths and
+/// fix commands, at `error` (jonaswre/boxlite-quick#33).
+fn log_to_stderr() {
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::ERROR.into())
+        .with_env_var("BOXQ_LOG")
+        .from_env_lossy();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .without_time()
+        .init();
 }
 
 /// Creates the Workspace's Sandbox from the config, or reattaches to it, saying which and

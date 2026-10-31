@@ -13,7 +13,7 @@ use anyhow::Context;
 use boxlite::runtime::options::{
     BoxOptions, NetworkMode, NetworkSpec, OutboundNetworkConfig, RootfsSpec, VolumeSpec,
 };
-use boxlite::{BoxCommand, BoxStatus, GuestSession};
+use boxlite::{BoxCommand, BoxStatus, GuestSession, LiteBox};
 use boxlite_shared::BoxTransport;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -192,9 +192,11 @@ impl Sandboxes {
         egress: &Policy,
         auth: &Auth,
     ) -> anyhow::Result<Up> {
-        let rt = runtime::open(&self.boxlite_home())?;
+        let rt = runtime::open(&self.boxlite_home())
+            .with_context(|| failed("open the runtime for", ws))?;
         // The runtime's lock keeps the Box from appearing or vanishing until it is created.
-        let record = match rt.get_info(&ws.box_name()).await? {
+        let found = rt.get_info(&ws.box_name()).await;
+        let record = match found.with_context(|| failed("look up", ws))? {
             Some(_) => self.read_record(&ws.box_name())?.unwrap_or(Record {
                 workspace: ws.path().into(),
                 as_created: None,
@@ -216,9 +218,9 @@ impl Sandboxes {
         self.write_record(ws, &record)?;
         let mut options = BoxOptions {
             rootfs: RootfsSpec::Image(spec.image.clone()),
-            cpus: spec.cpus,
-            memory_mib: spec.memory_mib,
-            disk_size_gb: spec.disk_gib,
+            cpus: Some(spec.cpus_or_default()),
+            memory_mib: Some(spec.memory_mib_or_default()),
+            disk_size_gb: Some(spec.disk_gib_or_default()),
             entrypoint: Some(vec![]),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             // Fixed once the Box exists, so a Sandbox keeps the binds it was created with.
@@ -239,11 +241,14 @@ impl Sandboxes {
             ..Default::default()
         };
         auth.apply(&mut options);
-        let (b, created) = rt.get_or_create(options, Some(ws.box_name())).await?;
-        if b.info().await?.status != BoxStatus::Running {
+        let (b, created) = rt
+            .get_or_create(options, Some(ws.box_name()))
+            .await
+            .with_context(|| failed("create", ws))?;
+        if status(&b, ws).await? != BoxStatus::Running {
             // A VM leaked by an earlier stop must never share the disk with this one.
             reap_box(&self.boxlite_home(), b.id().as_ref())?;
-            b.start().await?;
+            b.start().await.with_context(|| failed("start", ws))?;
         }
         // The Global Config or an Egress Approval may have changed since the Box was created.
         b.network()
@@ -251,7 +256,8 @@ impl Sandboxes {
                 mode: NetworkMode::Enabled,
                 allow_net: egress.allow_net().to_vec(),
             })
-            .await?;
+            .await
+            .with_context(|| failed("apply the Egress Policy to", ws))?;
         let box_dir = self.boxlite_home().join("boxes").join(b.id().as_ref());
         Ok(Up {
             created,
@@ -280,23 +286,27 @@ impl Sandboxes {
 
     /// Stops the Workspace's Sandbox, keeping its state.
     pub async fn stop(&self, ws: &Workspace) -> anyhow::Result<()> {
-        let rt = runtime::open(&self.boxlite_home())?;
-        let Some(b) = rt.get(&ws.box_name()).await? else {
+        let rt = runtime::open(&self.boxlite_home()).with_context(|| failed("stop", ws))?;
+        let found = rt.get(&ws.box_name()).await;
+        let Some(b) = found.with_context(|| failed("look up", ws))? else {
             return Err(NoSandbox(ws.path().into()).into());
         };
-        if b.info().await?.status == BoxStatus::Running {
-            b.stop().await?;
+        if status(&b, ws).await? == BoxStatus::Running {
+            b.stop().await.with_context(|| failed("stop", ws))?;
         }
         reap_box(&self.boxlite_home(), b.id().as_ref())
     }
 
     /// Removes the Workspace's Sandbox and its state.
     pub async fn rm(&self, ws: &Workspace) -> anyhow::Result<()> {
-        let rt = runtime::open(&self.boxlite_home())?;
-        let Some(info) = rt.get_info(&ws.box_name()).await? else {
+        let rt = runtime::open(&self.boxlite_home()).with_context(|| failed("remove", ws))?;
+        let found = rt.get_info(&ws.box_name()).await;
+        let Some(info) = found.with_context(|| failed("look up", ws))? else {
             return Err(NoSandbox(ws.path().into()).into());
         };
-        rt.remove(&ws.box_name(), true).await?;
+        rt.remove(&ws.box_name(), true)
+            .await
+            .with_context(|| failed("remove", ws))?;
         reap_box(&self.boxlite_home(), info.id.as_ref())?;
         let record = self.record_path(&ws.box_name());
         match std::fs::remove_file(&record) {
@@ -309,9 +319,9 @@ impl Sandboxes {
 
     /// Every Sandbox, ordered by Workspace path, with any whose record is lost last.
     pub async fn list(&self) -> anyhow::Result<Vec<Listed>> {
-        let rt = runtime::open(&self.boxlite_home())?;
+        let rt = runtime::open(&self.boxlite_home()).context("cannot list the Sandboxes")?;
         let mut listed = Vec::new();
-        for info in rt.list_info().await? {
+        for info in rt.list_info().await.context("cannot list the Sandboxes")? {
             let box_name = info.name.unwrap_or_else(|| info.id.to_string());
             listed.push(Listed {
                 workspace: self.read_record(&box_name)?.map(|r| r.workspace),
@@ -348,6 +358,21 @@ impl Sandboxes {
     fn read_record(&self, box_name: &str) -> anyhow::Result<Option<Record>> {
         read_or_default(&self.record_path(box_name), |s| toml::from_str(s).map(Some))
     }
+}
+
+/// Whether the Workspace's Box `b` is running, stopped or otherwise.
+async fn status(b: &LiteBox, ws: &Workspace) -> anyhow::Result<BoxStatus> {
+    let info = b
+        .info()
+        .await
+        .with_context(|| failed("check the state of", ws))?;
+    Ok(info.status)
+}
+
+/// The error context for a failed `step` on the Workspace's Sandbox: "cannot `step` the Sandbox
+/// for <path>".
+fn failed(step: &str, ws: &Workspace) -> String {
+    format!("cannot {step} the Sandbox for {}", ws.path().display())
 }
 
 /// The container id is `pub(crate)` in BoxLite 0.11; it is the one directory name under

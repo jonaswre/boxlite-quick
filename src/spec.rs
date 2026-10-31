@@ -5,12 +5,19 @@ use crate::config::Resources;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// The image a Sandbox is created from when the config sets none, until the base image leaves
-/// the map's fog.
-const INTERIM_IMAGE: &str = "node:22-bookworm";
+/// boxq's Base Image, which a Sandbox is created from when the config sets none. Pinned by
+/// digest, so a cached copy is used with no registry round trip; bumped by hand to a build the
+/// image workflow published (jonaswre/boxlite-quick#29).
+pub const BASE_IMAGE: &str = "ghcr.io/jonaswre/boxq:2.1.312-247cf26@sha256:55a29d246f63c1788b39fec42d4067c11decb5a8843200566abc07abf3165709";
 
-/// The image and resources to create a Sandbox with. A `None` resource leaves the choice to
-/// BoxLite's default.
+/// What a Sandbox gets for a resource no config sets (jonaswre/boxlite-quick#31). Filled in only
+/// when the Box is built, so changing one never makes an existing Sandbox look out of date.
+pub const DEFAULT_CPUS: u8 = 4;
+pub const DEFAULT_MEMORY_MIB: u32 = 8 * 1024;
+pub const DEFAULT_DISK_GIB: u64 = 32;
+
+/// The image and resources to create a Sandbox with, as configured. A `None` resource gets
+/// boxq's default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spec {
     pub image: String,
@@ -31,12 +38,27 @@ impl Spec {
             })
             .transpose()?;
         Ok(Self {
-            image: image.unwrap_or(INTERIM_IMAGE).into(),
+            image: image.unwrap_or(BASE_IMAGE).into(),
             cpus: resources.cpus.map(|n| n.get()),
             memory_mib,
             // BoxLite sizes a disk in whole GiB; rounding up never gives less than asked for.
             disk_gib: resources.disk.map(|d| d.mib().div_ceil(1024)),
         })
+    }
+
+    /// The vCPUs to build the Box with: the configured count, else boxq's default.
+    pub fn cpus_or_default(&self) -> u8 {
+        self.cpus.unwrap_or(DEFAULT_CPUS)
+    }
+
+    /// The memory to build the Box with: the configured MiB, else boxq's default.
+    pub fn memory_mib_or_default(&self) -> u32 {
+        self.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB)
+    }
+
+    /// The disk to build the Box with: the configured GiB, else boxq's default.
+    pub fn disk_gib_or_default(&self) -> u64 {
+        self.disk_gib.unwrap_or(DEFAULT_DISK_GIB)
     }
 
     /// The names of this Spec's settings that the Sandbox, created from `created`, lacks, for
