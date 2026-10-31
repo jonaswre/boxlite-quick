@@ -2,7 +2,7 @@ use boxq::config::{Resources, Size};
 use boxq::spec::{Spec, mismatch_warning};
 
 #[test]
-fn with_nothing_configured_a_sandbox_gets_the_interim_image_and_boxlites_defaults() {
+fn with_nothing_configured_a_sandbox_gets_the_interim_image_and_no_resources_set() {
     let spec = Spec::new(None, &Resources::default()).unwrap();
 
     assert_eq!(
