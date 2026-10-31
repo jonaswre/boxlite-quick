@@ -16,7 +16,7 @@ use boxq::egress::Policy;
 use boxq::reap::reap_box;
 use boxq::sandbox::{ExecTarget, Listed, Sandboxes, Up};
 use boxq::setup::{self, Failed, Source};
-use boxq::spec::Spec;
+use boxq::spec::{DEFAULT_CPUS, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, Spec};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -474,14 +474,15 @@ async fn a_sandbox_with_no_resources_configured_gets_boxqs_defaults() {
         panic!("unexpected output: {out:?}");
     };
     let mib = |kib: &str| kib.parse::<u64>().unwrap() / 1024;
-    assert_eq!(cpus, "4");
+    assert_eq!(cpus, DEFAULT_CPUS.to_string());
     // The guest kernel keeps some memory for itself.
+    let memory = u64::from(DEFAULT_MEMORY_MIB);
     assert!(
-        (7 * 1024..=8 * 1024).contains(&mib(mem_kib)),
+        (memory - 1024..=memory).contains(&mib(mem_kib)),
         "MemTotal {mem_kib} KiB"
     );
     assert!(
-        (30 * 1024..=32 * 1024).contains(&mib(disk_kib)),
+        ((DEFAULT_DISK_GIB - 2) * 1024..=DEFAULT_DISK_GIB * 1024).contains(&mib(disk_kib)),
         "disk {disk_kib} KiB"
     );
     assert_eq!(up.as_created, Some(spec(IMAGE)));

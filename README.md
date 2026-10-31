@@ -1,13 +1,13 @@
 # boxq
 
-boxq runs Claude Code against a host project inside an isolated micro-VM. It is an open alternative to Docker's sbx, built on [BoxLite](https://github.com/boxlite-ai/boxlite).
+boxq runs Claude Code against a Workspace, a directory on your host, inside an isolated Sandbox. It is an open alternative to Docker's sbx, built on [BoxLite](https://github.com/boxlite-ai/boxlite).
 
 `boxq run` in any directory (a git worktree too) creates or reattaches to that directory's Sandbox and starts Claude Code in it, with every permission prompt off, since the Sandbox is the boundary. Each Workspace gets one persistent Sandbox:
 
 - The Workspace is mounted read-write at the same path. In a git worktree, the repo's common `.git` is mounted at its own path too, so git works unchanged.
 - Your Claude skills, agents, commands, settings, `CLAUDE.md` and MCP servers are copied in on every run. Credentials never are.
-- Claude Code authenticates through a base URL and API key, for example CLIProxyAPI. Over HTTPS the key never enters the VM: the guest holds a placeholder, which BoxLite swaps for the key in requests to the base URL's host.
-- Outbound traffic is deny-by-default, with an allowlist.
+- Claude Code authenticates through a base URL and API key, for example CLIProxyAPI. Over HTTPS the key never enters the Sandbox: the guest holds a placeholder, which BoxLite swaps for the key in requests to the base URL's host.
+- Outbound traffic is deny-by-default: an Egress Policy says what the Sandbox may reach.
 
 This README is for boxq's user and contributors. `GLOSSARY.md` defines the terms (Sandbox, Workspace, Egress Policy, …), and `docs/adr/` records the decisions behind them.
 
@@ -22,7 +22,7 @@ ls -l /dev/kvm                  # missing: enable VT-x/AMD-V in the firmware, th
 sudo usermod -aG kvm "$USER"    # then log in again
 ```
 
-**bubblewrap with user namespaces.** BoxLite jails each VM's process with `bwrap`, which has to create user namespaces. Ubuntu 24.04 refuses them (`kernel.apparmor_restrict_unprivileged_userns=1`) unless an AppArmor profile allows them for `/usr/bin/bwrap`. Install bubblewrap and this profile, which keeps the restriction in place for everything else:
+**bubblewrap with user namespaces.** BoxLite jails each Sandbox's process with `bwrap`, which has to create user namespaces. Ubuntu 24.04 refuses them (`kernel.apparmor_restrict_unprivileged_userns=1`) unless an AppArmor profile allows them for `/usr/bin/bwrap`. Install bubblewrap and this profile, which keeps the restriction in place for everything else:
 
 ```sh
 sudo apt install bubblewrap
@@ -84,7 +84,7 @@ RestrictSUIDSGID=no
 ProtectKernelTunables=no
 ```
 
-**A writable cgroup (optional).** BoxLite puts each VM in a cgroup under your systemd user manager (`/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/boxlite`) when it can write there. Where it can't, as over some SSH sessions, in CI or in a system service, it runs the VM without cgroup limits and says nothing. boxq then kills the VM's leftover processes itself on `stop` and `rm`.
+**A writable cgroup (optional).** BoxLite puts each Sandbox in a cgroup under your systemd user manager (`/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/boxlite`) when it can write there. Where it can't, as over some SSH sessions, in CI or in a system service, it runs the Sandbox without cgroup limits and says nothing. boxq then kills the Sandbox's leftover processes itself on `stop` and `rm`.
 
 **Other distros** are untested. BoxLite needs the same things everywhere: an accessible `/dev/kvm`, a `bwrap` that can create user namespaces (check with `bwrap --unshare-user --ro-bind / / true`), and permission to create setuid/setgid files and mount `/proc`. Without a system `bwrap`, BoxLite falls back to the one it bundles.
 
@@ -97,7 +97,7 @@ sudo apt install protobuf-compiler
 cargo build --release           # the binary is target/release/boxq
 ```
 
-`cargo test` runs the tests that need no VM. The ones that boot real Boxes are ignored by default. Run them with `cargo test -- --ignored`, on a host with the prerequisites above, as CI's `real-box` job does.
+`cargo test` runs the tests that need no KVM. The ones that boot a real Sandbox are ignored by default. Run them with `cargo test -- --ignored`, on a host with the prerequisites above, as CI's `real-box` job does.
 
 ## Commands
 
@@ -123,7 +123,7 @@ boxq never installs Claude Code itself. Any image you configure must have `claud
 
 ### Building and bumping it
 
-`image/Dockerfile` sets the Claude Code release with `ARG CLAUDE_CODE_VERSION`. The `Base Image` workflow builds `linux/amd64` on `main` when `image/` changes, or on manual dispatch. It boots a real Box from that exact build and checks that Claude Code starts with no prompts. Only if that passes does it tag the build `ghcr.io/jonaswre/boxq:<claude-version>-<short sha>`. The job summary then shows the `tag@digest` ref. Bumping the image is a manual step: paste that ref into `BASE_IMAGE` in `src/spec.rs`.
+`image/Dockerfile` sets the Claude Code release with `ARG CLAUDE_CODE_VERSION`. The `Base Image` workflow builds `linux/amd64` on `main` when `image/` changes, or on manual dispatch. It boots a Sandbox from that exact build and checks that Claude Code starts with no prompts. Only if that passes does it tag the build `ghcr.io/jonaswre/boxq:<claude-version>-<short sha>`. The job summary then shows the `tag@digest` ref. Bumping the image is a manual step: paste that ref into `BASE_IMAGE` in `src/spec.rs`.
 
 A Sandbox keeps the image it was created with. After a bump, `boxq rm` a Sandbox to recreate it from the new image. That discards the Sandbox's state.
 
@@ -144,7 +144,7 @@ memory = "16GiB"
 disk = "64GiB"
 
 [egress]
-builtins = true                                # the built-in allowlist below
+builtins = true                                # the built-in entries below
 allow = ["registry.example.com", "*.example.org", "100.64.0.7", "10.0.0.0/8"]
 allow_host_loopback = false                    # the host's 127.0.0.1, as host.boxlite.internal
 ```
@@ -157,7 +157,7 @@ api_key = "sk-…"
 
 **The Workspace Config**, `.boxq.toml` in the Workspace, travels with the repo, usually committed. boxq treats it as untrusted, since whoever wrote the repo wrote it (ADR 0001):
 
-- It may set `image`, `setup` and `[resources]`, which override the Global Config's.
+- It may set `image` and `[resources]`, which override the Global Config's, and `setup`, which runs after the Global Config's; see [Setup Hooks](#setup-hooks).
 - Its `[egress] allow` entries apply only with an Egress Approval; see below.
 - It may not set `base_url`, `egress.builtins` or `egress.allow_host_loopback`. boxq refuses a file that does.
 
@@ -222,7 +222,7 @@ The host's copy wins, and nothing is deleted, so something removed on the host s
 MCP servers run inside the Sandbox. Two things to know:
 
 - **Their API hosts are not allowed automatically.** Add each MCP server's API host to the Global Config's `allow` by hand. boxq doesn't work them out from the MCP config.
-- **Their secrets enter the Sandbox.** MCP secrets are copied as-is into the guest's `~/.claude.json` (mode `0600`). Unlike the API key, they don't use a placeholder, so the Egress Policy is what limits where they can go. A `${VAR}` reference to a host environment variable is empty inside the Sandbox, so such a server starts without its secret.
+- **Their secrets enter the Sandbox.** MCP secrets are copied as-is into the guest's `~/.claude.json` (mode `0600`). Unlike the API key, they don't use a placeholder, so the Egress Policy is what limits where they can go.
 
 ## Egress Policy
 

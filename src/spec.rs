@@ -46,6 +46,21 @@ impl Spec {
         })
     }
 
+    /// The vCPUs to build the Box with: the configured count, else boxq's default.
+    pub fn cpus_or_default(&self) -> u8 {
+        self.cpus.unwrap_or(DEFAULT_CPUS)
+    }
+
+    /// The memory to build the Box with: the configured MiB, else boxq's default.
+    pub fn memory_mib_or_default(&self) -> u32 {
+        self.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB)
+    }
+
+    /// The disk to build the Box with: the configured GiB, else boxq's default.
+    pub fn disk_gib_or_default(&self) -> u64 {
+        self.disk_gib.unwrap_or(DEFAULT_DISK_GIB)
+    }
+
     /// The names of this Spec's settings that the Sandbox, created from `created`, lacks, for
     /// [`mismatch_warning`].
     pub fn changes(&self, created: &Spec) -> Vec<&'static str> {

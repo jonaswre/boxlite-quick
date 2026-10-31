@@ -101,6 +101,31 @@ fn a_sandbox_that_cannot_start_names_the_step_and_prints_boxlites_report() {
     );
 }
 
+#[test]
+fn a_runtime_that_cannot_open_is_told_apart_from_a_sandbox_that_cannot_start() {
+    let host = Host::new();
+    let ws = host.ws.path().to_str().unwrap();
+    // A file where boxq's home should be, so BoxLite's runtime can't open in it.
+    let home = host.tmp.path().join("home-is-a-file");
+    std::fs::write(&home, "").unwrap();
+
+    let run = host
+        .command(&home, &["run", ws])
+        .env("BOXQ_BASE_URL", "https://cliproxy.boxq.invalid")
+        .env("BOXQ_API_KEY", "boxq-fake-key")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!run.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "Error: cannot open the runtime for the Sandbox for {ws}"
+        )),
+        "{stderr}"
+    );
+}
+
 fn allow() -> Vec<String> {
     ALLOW.iter().map(|&e| e.into()).collect()
 }

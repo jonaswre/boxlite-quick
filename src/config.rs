@@ -3,6 +3,7 @@
 
 use crate::Workspace;
 use anyhow::Context;
+use boxlite::runtime::constants::vm_defaults::MAX_CPUS;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::net::Ipv4Addr;
@@ -79,9 +80,6 @@ fn host_ram_mib() -> anyhow::Result<u64> {
     }
     Ok(info.totalram * u64::from(info.mem_unit) / (1024 * 1024))
 }
-
-/// The most vCPUs a Sandbox can have: `boxlite` 0.11's `vm_defaults::MAX_CPUS`.
-const MAX_CPUS: u8 = 16;
 
 /// A size in whole MiB, written as a whole number of `MiB` or `GiB` (`"512MiB"`, `"8GiB"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
