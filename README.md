@@ -97,7 +97,7 @@ sudo apt install protobuf-compiler
 cargo build --release           # the binary is target/release/boxq
 ```
 
-`cargo test` runs the tests that need no KVM. The ones that boot a real Sandbox are ignored by default. Run them with `cargo test -- --ignored`, on a host with the prerequisites above, as CI's `real-box` job does. CI's `test` job also fails on `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.
+`cargo test` runs the tests that need no KVM. The ones that boot a real Sandbox are ignored by default. Run them with `scripts/real-box` on a host with the prerequisites above; [docs/agents/testing.md](docs/agents/testing.md) says which groups to run. CI's `real-box` job runs them all on every push. CI's `test` job also fails on `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.
 
 ## Commands
 

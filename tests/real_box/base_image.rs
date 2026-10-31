@@ -66,16 +66,7 @@ fn plain(screen: &str) -> String {
 async fn claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
-    let up = f
-        .sandboxes
-        .up(
-            &f.workspace,
-            &spec(&claude_image()),
-            &default_policy(),
-            &f.auth,
-        )
-        .await
-        .unwrap();
+    let up = f.up(&claude_image()).await;
     // Prompts and their keys change between releases, so this test is what proves the seeded
     // keys still skip them in the release the image ships.
     boxq::claude::check_installed(&up.target, &f.workspace)
@@ -118,11 +109,7 @@ async fn run_on_a_fresh_workspace_starts_claude_code_from_the_pinned_base_image(
     // The run pulls the Base Image into the fixture's empty home first.
     run.expect_within("bypass permissions on", std::time::Duration::from_secs(600));
     drop(run);
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
 
     assert_eq!(up.as_created.unwrap().image, boxq::spec::BASE_IMAGE);
 }

@@ -53,11 +53,7 @@ async fn a_new_sandbox_gets_the_configured_image_and_resources() {
 async fn a_sandbox_with_no_resources_configured_gets_boxqs_defaults() {
     let f = Fixture::new();
 
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
     let (out, code) = sh(
         &up.target,
         "nproc; grep MemTotal /proc/meminfo | tr -dc 0-9; echo; df -k / | awk 'NR==2{print $2}'",

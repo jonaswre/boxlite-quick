@@ -1,7 +1,6 @@
 //! Setup Hooks: `src/setup.rs`.
 
 use super::*;
-use boxq::sandbox::Up;
 use boxq::setup::{self, Failed, Source};
 
 fn hooks(global: Option<&str>, workspace: Option<&str>) -> SetupHooks {
@@ -12,14 +11,6 @@ fn hooks(global: Option<&str>, workspace: Option<&str>) -> SetupHooks {
 }
 
 impl Fixture {
-    /// The Workspace's Sandbox from `image`, created or reattached as `boxq run` would.
-    async fn up(&self, image: &str) -> Up {
-        self.sandboxes
-            .up(&self.workspace, &spec(image), &default_policy(), &self.auth)
-            .await
-            .unwrap()
-    }
-
     /// Runs the Setup Hooks `up` hasn't finished, with no interrupt.
     async fn set_up(&self, up: &Up, hooks: &SetupHooks) -> Option<Failed> {
         setup::run_until(

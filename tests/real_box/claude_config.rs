@@ -7,11 +7,7 @@ use super::*;
 async fn the_hosts_claude_config_merges_into_the_sandboxs_own() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
     sh(
         &up.target,
         r#"mkdir -p /root/.claude && echo '{"numStartups": 3}' > /root/.claude.json &&
@@ -68,11 +64,7 @@ async fn the_hosts_claude_config_merges_into_the_sandboxs_own() {
 async fn a_sandbox_without_claude_config_gets_one() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
 
     host.sync(&f.workspace, &up.target).await.unwrap();
     host.sync(&f.workspace, &up.target).await.unwrap();
@@ -95,11 +87,7 @@ async fn a_claude_config_larger_than_one_exec_message_is_synced() {
     let host = host_claude_config(&dir, &f.workspace);
     // BoxLite's guest refuses a single stdin message over 4 MiB.
     std::fs::write(dir.join("dotfiles/review/asset.bin"), vec![7u8; 5 << 20]).unwrap();
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
 
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
@@ -120,16 +108,7 @@ async fn a_claude_config_larger_than_one_exec_message_is_synced() {
 async fn the_claude_config_reaches_roots_home_whatever_the_images_user() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
-    let up = f
-        .sandboxes
-        .up(
-            &f.workspace,
-            &spec(NON_ROOT_IMAGE),
-            &default_policy(),
-            &f.auth,
-        )
-        .await
-        .unwrap();
+    let up = f.up(NON_ROOT_IMAGE).await;
     let (user, _) = sh(&up.target, "id -u").await.unwrap();
     assert_ne!(user, "0\n", "the image's user is root");
 

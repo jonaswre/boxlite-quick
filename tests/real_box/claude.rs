@@ -7,11 +7,7 @@ use super::*;
 #[ignore = "boots a real Box; needs KVM"]
 async fn run_starts_a_stub_claude_in_the_workspace_and_shell_works_beside_it() {
     let f = Fixture::new();
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
     // A stand-in for Claude Code that shows how it was started, then stays interactive.
     let stub = r#"printf '#!/bin/sh\necho "claude:$*:$PWD:$IS_SANDBOX"\nexec sh -l\n' \
         > /usr/local/bin/claude && chmod +x /usr/local/bin/claude"#;
@@ -36,11 +32,7 @@ async fn run_starts_a_stub_claude_in_the_workspace_and_shell_works_beside_it() {
 #[ignore = "boots a real Box; needs KVM"]
 async fn an_image_without_claude_code_is_refused_not_installed_into() {
     let f = Fixture::new();
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
 
     let checked = boxq::claude::check_installed(&up.target, &f.workspace).await;
 

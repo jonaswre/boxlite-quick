@@ -1,4 +1,9 @@
-//! Creating, reattaching, stopping, removing and listing Sandboxes, and waiting on the BoxLite runtime: `src/sandbox.rs`, `src/runtime.rs` and `src/reap.rs`.
+//! Creating, reattaching, stopping, removing and listing Sandboxes, and waiting on the BoxLite
+//! runtime: `src/sandbox.rs`, `src/runtime.rs` and `src/reap.rs`.
+//!
+//! Where a test needs another boxq process holding the BoxLite home, a second runtime in this
+//! process stands in for it: BoxLite's home lock is a `flock` on a file each runtime opens for
+//! itself, so the two runtimes contend for it as two processes would.
 
 use super::*;
 use boxlite::runtime::options::{BoxOptions, RootfsSpec};
@@ -6,14 +11,10 @@ use boxq::sandbox::Listed;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "boots a real Box; needs KVM"]
-async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime() {
+async fn a_command_runs_in_a_new_sandbox_while_another_runtime_holds_the_home() {
     let f = Fixture::new();
 
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
     let held = f.runtime();
     let ran = sh(&up.target, "echo hello from the sandbox").await.unwrap();
     drop(held);
@@ -26,19 +27,11 @@ async fn a_command_runs_in_a_new_sandbox_while_another_process_holds_the_runtime
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_stopped_sandbox_is_reattached_with_its_state() {
     let f = Fixture::new();
-    let first = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let first = f.up(IMAGE).await;
     sh(&first.target, "echo kept > /root/state").await.unwrap();
 
     f.sandboxes.stop(&f.workspace).await.unwrap();
-    let again = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let again = f.up(IMAGE).await;
 
     assert!(!again.created);
     let read = sh(&again.target, "cat /root/state").await.unwrap();
@@ -53,16 +46,10 @@ async fn a_stopped_sandbox_is_reattached_with_its_state() {
 async fn no_shim_survives_stop_or_rm() {
     let f = Fixture::new();
 
-    f.sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    f.up(IMAGE).await;
     f.sandboxes.stop(&f.workspace).await.unwrap();
     let after_stop = shims(&f.sandboxes.boxlite_home()).unwrap();
-    f.sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    f.up(IMAGE).await;
     f.sandboxes.rm(&f.workspace).await.unwrap();
     let after_rm = shims(&f.sandboxes.boxlite_home()).unwrap();
 
@@ -89,19 +76,11 @@ fn shims(home: &Path) -> anyhow::Result<Vec<PathBuf>> {
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_removed_sandbox_is_created_afresh() {
     let f = Fixture::new();
-    let first = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let first = f.up(IMAGE).await;
     sh(&first.target, "echo gone > /root/state").await.unwrap();
 
     f.sandboxes.rm(&f.workspace).await.unwrap();
-    let again = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let again = f.up(IMAGE).await;
 
     assert!(again.created);
     let read = sh(&again.target, "test -e /root/state").await.unwrap();
@@ -170,7 +149,7 @@ async fn sandboxes_are_listed_by_workspace_path() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "boots a real Box; needs KVM"]
-async fn up_waits_for_a_runtime_another_process_holds() {
+async fn up_waits_for_another_runtime_to_release_the_home() {
     let f = Fixture::new();
     let held = f.runtime();
     let release = std::thread::spawn(move || {
@@ -178,11 +157,8 @@ async fn up_waits_for_a_runtime_another_process_holds() {
         drop(held);
     });
 
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await;
+    let up = f.up(IMAGE).await;
     release.join().unwrap();
 
-    assert!(up.unwrap().created);
+    assert!(up.created);
 }

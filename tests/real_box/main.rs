@@ -1,8 +1,8 @@
 //! Boots real Boxes, so it needs Linux x86_64, KVM and BoxLite's host prerequisites. Run with
 //! `scripts/real-box` (see `docs/agents/testing.md`); CI runs it on every push.
 //!
-//! The tests are grouped by area, one module each, so `cargo test --test real_box <group>:: --
-//! --ignored` runs one group. Each module's doc says which code it covers.
+//! The tests are grouped by area, one module each, so `scripts/real-box <group>::` runs one
+//! group. Each module's doc says which code it covers.
 //!
 //! boxq execs through the Box's own `box.sock` so no runtime (and no `BOXLITE_HOME` lock) is
 //! held during a session (jonaswre/boxlite-quick#8). That leans on BoxLite internals: the
@@ -29,7 +29,7 @@ use boxq::claude_config::ClaudeConfig;
 use boxq::config::{BaseUrl, Egress, SetupHooks};
 use boxq::egress::Policy;
 use boxq::reap::reap_box;
-use boxq::sandbox::{ExecTarget, Sandboxes};
+use boxq::sandbox::{ExecTarget, Sandboxes, Up};
 use boxq::spec::Spec;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -128,14 +128,37 @@ impl Fixture {
         path
     }
 
-    /// A BoxLite runtime on the home, as another process would open it.
-    fn runtime(&self) -> BoxliteRuntime {
-        BoxliteRuntime::new(BoxliteOptions {
-            home_dir: self.sandboxes.boxlite_home(),
-            ..Default::default()
-        })
-        .unwrap()
+    /// The Workspace's Sandbox from `image`, created or reattached as `boxq run` would.
+    async fn up(&self, image: &str) -> Up {
+        self.sandboxes
+            .up(&self.workspace, &spec(image), &default_policy(), &self.auth)
+            .await
+            .unwrap()
     }
+
+    /// Another BoxLite runtime on the home, which holds its lock as another process's would.
+    fn runtime(&self) -> BoxliteRuntime {
+        open_runtime(&self.sandboxes.boxlite_home())
+    }
+}
+
+/// A BoxLite runtime on the BoxLite home `home`.
+fn open_runtime(home: &Path) -> BoxliteRuntime {
+    BoxliteRuntime::new(BoxliteOptions {
+        home_dir: home.into(),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+/// Runs `future` on a fresh tokio runtime in a thread of its own. Code already running in a
+/// tokio runtime can't block on it.
+fn block_on_own_runtime<F: Future<Output: Send> + Send>(future: F) -> F::Output {
+    std::thread::scope(|s| {
+        s.spawn(|| tokio::runtime::Runtime::new().unwrap().block_on(future))
+            .join()
+            .unwrap()
+    })
 }
 
 impl Drop for Fixture {
@@ -148,10 +171,8 @@ impl Drop for Fixture {
                 let _ = reap_box(&home, b.id.as_ref());
             }
         };
-        // Drop runs inside the test's own tokio runtime, which can't be blocked on.
-        std::thread::scope(|s| {
-            s.spawn(|| tokio::runtime::Runtime::new().unwrap().block_on(clean_up));
-        });
+        // Drop runs inside the test's own tokio runtime.
+        block_on_own_runtime(clean_up);
     }
 }
 
@@ -188,20 +209,13 @@ static INDEXED_HOME: LazyLock<PathBuf> = LazyLock::new(|| {
 /// Pulls `images` into [`IMAGE_STORE`] through a BoxLite home of their own at `home`.
 fn pull_into_store(home: &Path, images: &[&str]) {
     link_image_dirs(home);
-    let pull = async {
-        let rt = BoxliteRuntime::new(BoxliteOptions {
-            home_dir: home.into(),
-            ..Default::default()
-        })
-        .unwrap();
+    // The first test to ask runs in its own tokio runtime. The BoxLite runtime is dropped once
+    // the pull ends, closing the home's database for fixtures to copy.
+    block_on_own_runtime(async {
+        let rt = open_runtime(home);
         for &image in images {
             rt.images().unwrap().pull(image).await.unwrap();
         }
-    };
-    // The first test to ask runs in its own tokio runtime, which can't be blocked on. The runtime
-    // here is dropped once the thread ends, closing the home's database for fixtures to copy.
-    std::thread::scope(|s| {
-        s.spawn(|| tokio::runtime::Runtime::new().unwrap().block_on(pull));
     });
 }
 
