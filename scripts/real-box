@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Runs the real-Box tests within one command (jonaswre/boxlite-quick#42), as docs/agents/testing.md
+# says. Arguments go to libtest after `--ignored`: test filters such as `egress::`, `--skip`,
+# `--exact`.
+#
+# The build and the tests share one time limit, REAL_BOX_TIME_LIMIT seconds (default 540), so the
+# command ends before an agent's 10-minute limit on one command. The output is saved to a log
+# under target/real-box/.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+limit=${REAL_BOX_TIME_LIMIT:-540}
+log_dir=${CARGO_TARGET_DIR:-target}/real-box
+mkdir -p "$log_dir"
+log=$log_dir/$(date +%Y%m%d-%H%M%S).log
+
+# The tests' homes go in a directory of this run's own, so whatever a stopped test left behind
+# can be found and removed. The kernel names an executable by its canonical path.
+# Without it, `reap` would match every process, so the run stops here.
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/real-box.XXXXXX") && run_dir=$(realpath "$run_dir") || {
+  echo "real-box: cannot create a directory for the run under ${TMPDIR:-/tmp}" >&2
+  exit 1
+}
+export TMPDIR=$run_dir
+trap 'reap; rm -rf "$run_dir"' EXIT
+
+# Kills every process that names this run's directory on its command line, and waits for them
+# to exit: the VMs of Boxes whose test was stopped before it could remove them, and the bwrap
+# jailers around them. Each runs in its own session, out of reach of `timeout`.
+reap() {
+  local pids
+  for _ in {1..50}; do
+    pids=$(grep -lsFf <(echo "$run_dir/") /proc/[0-9]*/cmdline | cut -d/ -f3)
+    [[ -n $pids ]] || return 0
+    # shellcheck disable=SC2086
+    kill -KILL $pids 2>/dev/null
+    sleep 0.1
+  done
+}
+
+# Runs a command with what is left of the time limit, appending its output to the log. If it
+# fails, exits saying so: `$1` names the step for the time limit and `$2` says what failed.
+step() {
+  local what=$1 failed=$2 status
+  shift 2
+  # A leftover VM holds the output pipe open, so it's reaped before the pipe can close.
+  {
+    left=$((limit - SECONDS))
+    if ((left > 0)); then
+      timeout --kill-after=10 "$left" "$@"
+      status=$?
+    else
+      status=124
+    fi
+    reap
+    exit "$status"
+  } 2>&1 | tee -a "$log"
+  status=${PIPESTATUS[0]}
+  # `timeout` exits 124, or 137 if it had to kill. A test killed by a signal, such as by the OOM
+  # killer, exits 137 too, so the limit is blamed only once it has passed.
+  if ((status == 124 || status == 137)) && ((SECONDS >= limit)); then
+    echo "real-box: $what hit the time limit of $limit s; the output is in $log" >&2
+    exit "$status"
+  elif ((status != 0)); then
+    echo "real-box: $failed; the output is in $log" >&2
+    exit "$status"
+  fi
+}
+
+step "the build" "the build failed" cargo test --locked --test real_box --no-run
+step "the tests" "a test failed" cargo test --locked --test real_box -- --ignored "$@"
+echo "real-box: passed in $SECONDS s; the output is in $log" >&2

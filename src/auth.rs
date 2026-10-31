@@ -50,7 +50,7 @@ impl Auth {
             ("ANTHROPIC_BASE_URL".into(), self.base_url.as_str().into()),
             ("ANTHROPIC_AUTH_TOKEN".into(), PLACEHOLDER.into()),
             // Updates, telemetry, error reports and the plugin marketplace would each need
-            // their own egress, and the Agent works without them (jonaswre/boxlite#3).
+            // their own egress, and the Agent works without them (jonaswre/boxlite-quick#3).
             (
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
                 "1".into(),

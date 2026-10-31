@@ -11,19 +11,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the Rust toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Install protoc, which BoxLite's build needs
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
-  # Boots a real Box. Only x86_64 hosted runners expose /dev/kvm (jonaswre/boxlite#4).
+  # Boots a real Box. Only x86_64 hosted runners expose /dev/kvm (jonaswre/boxlite-quick#4).
   real-box:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the Rust toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Install protoc, which BoxLite's build needs
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
