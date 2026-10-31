@@ -1,5 +1,5 @@
 //! Boots real Boxes, so it needs Linux x86_64, KVM and BoxLite's host prerequisites. Run with
-//! `cargo test --test real_box -- --ignored`; CI runs it on every push.
+//! `scripts/real-box` (see `docs/agents/testing.md`); CI runs it on every push.
 //!
 //! The tests are grouped by area, one module each, so `cargo test --test real_box <group>:: --
 //! --ignored` runs one group. Each module's doc says which code it covers.
