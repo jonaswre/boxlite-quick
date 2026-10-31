@@ -20,6 +20,10 @@ _Avoid_: Project, mount, volume
 boxq's own image, which a Sandbox is created from unless the config sets another. A generic core with the Agent preinstalled, and none of boxq's config.
 _Avoid_: Default image, container image, base
 
+**Setup Hook**:
+A command a Global Config or Workspace Config gives to prepare a new Sandbox, run once when the Sandbox is created.
+_Avoid_: Init script, provisioning, postCreate
+
 **Agent**:
 The AI coding tool run inside a Sandbox, such as Claude Code.
 _Avoid_: Assistant, bot, model

@@ -1,5 +1,5 @@
 use boxq::Workspace;
-use boxq::config::{BaseUrl, Config};
+use boxq::config::{BaseUrl, Config, SetupHooks};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -61,7 +61,7 @@ fn with_no_config_files_boxq_uses_the_defaults() {
     assert_eq!(config.base_url, None);
     assert!(config.api_key.is_none());
     assert_eq!(config.image, None);
-    assert_eq!(config.setup, None);
+    assert_eq!(config.setup, SetupHooks::default());
     assert_eq!(config.resources.cpus, None);
     assert_eq!(config.resources.memory, None);
     assert_eq!(config.resources.disk, None);
@@ -94,7 +94,7 @@ fn the_global_config_is_read_from_the_home_config_dir() {
         Some("https://cliproxy.tailnet.ts.net")
     );
     assert_eq!(config.image.as_deref(), Some("ghcr.io/jonaswre/boxq:1"));
-    assert_eq!(config.setup.as_deref(), Some("npm ci"));
+    assert_eq!(config.setup.global.as_deref(), Some("npm ci"));
     assert!(!config.egress.builtins);
     assert_eq!(config.egress.allow, ["*.mycorp.internal"]);
     assert!(config.egress.allow_host_loopback);
@@ -209,18 +209,30 @@ fn anthropic_env_vars_are_ignored() {
 #[test]
 fn the_workspace_config_wins_over_the_global_config_for_single_values() {
     let host = Host::new();
-    host.write_global(
-        r#"
-        image = "global-image"
-        setup = "global-setup"
-        "#,
-    );
+    host.write_global(r#"image = "global-image""#);
     host.write_workspace(r#"image = "workspace-image""#);
 
     let config = host.load().unwrap();
 
     assert_eq!(config.image.as_deref(), Some("workspace-image"));
-    assert_eq!(config.setup.as_deref(), Some("global-setup"));
+}
+
+/// Both run, the Global Config's first, so neither replaces the other.
+#[test]
+fn the_global_and_workspace_setup_hooks_are_kept_apart() {
+    let host = Host::new();
+    host.write_global(r#"setup = "global-setup""#);
+    host.write_workspace(r#"setup = "workspace-setup""#);
+
+    let config = host.load().unwrap();
+
+    assert_eq!(
+        config.setup,
+        SetupHooks {
+            global: Some("global-setup".into()),
+            workspace: Some("workspace-setup".into()),
+        }
+    );
 }
 
 #[test]

@@ -7,6 +7,7 @@
 use crate::Workspace;
 use crate::sandbox::{ExecTarget, OutputChunks};
 use anyhow::Context;
+use boxlite::BoxCommand;
 use rustix::termios::{OptionalActions, Termios, isatty, tcgetattr, tcgetwinsize, tcsetattr};
 use std::io::Read;
 use tokio::io::AsyncWriteExt;
@@ -30,16 +31,7 @@ pub async fn interactive(
     ws: &Workspace,
     argv: &[&str],
 ) -> anyhow::Result<i32> {
-    let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
-    let command = target
-        .command(argv[0])
-        .args(argv[1..].iter().copied())
-        .working_dir(ws.path().to_string_lossy())
-        .user("root")
-        // Claude Code refuses to skip permissions as root unless it knows it is sandboxed.
-        .env("IS_SANDBOX", "1")
-        .env("TERM", term)
-        .tty(true);
+    let command = command(target, ws, argv).tty(true);
     // Caught from before the exec starts, so no signal kills boxq and orphans the session.
     let mut sigwinch = signal(SignalKind::window_change())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -108,8 +100,21 @@ pub async fn interactive(
     Ok(shell_status(result.exit_code))
 }
 
+/// `argv` as a session runs it: as root in the Workspace's directory, with the session's env.
+pub(crate) fn command(target: &ExecTarget, ws: &Workspace, argv: &[&str]) -> BoxCommand {
+    let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
+    target
+        .command(argv[0])
+        .args(argv[1..].iter().copied())
+        .working_dir(ws.path().to_string_lossy())
+        .user("root")
+        // Claude Code refuses to skip permissions as root unless it knows it is sandboxed.
+        .env("IS_SANDBOX", "1")
+        .env("TERM", term)
+}
+
 /// BoxLite reports death by signal N as -N; a shell reports it as 128 + N.
-fn shell_status(exit_code: i32) -> i32 {
+pub(crate) fn shell_status(exit_code: i32) -> i32 {
     if exit_code < 0 {
         128 - exit_code
     } else {

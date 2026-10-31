@@ -39,11 +39,10 @@ impl Spec {
         })
     }
 
-    /// The one line telling the user that the Sandbox for `workspace`, created from `created`,
-    /// lacks this Spec's settings, or `None` if it has them. boxq never rebuilds a Sandbox on
-    /// its own, since that discards its state.
-    pub fn mismatch_warning(&self, created: &Spec, workspace: &Path) -> Option<String> {
-        let changed: Vec<_> = [
+    /// The names of this Spec's settings that the Sandbox, created from `created`, lacks, for
+    /// [`mismatch_warning`].
+    pub fn changes(&self, created: &Spec) -> Vec<&'static str> {
+        [
             ("image", self.image != created.image),
             ("cpus", self.cpus != created.cpus),
             ("memory", self.memory_mib != created.memory_mib),
@@ -51,19 +50,25 @@ impl Spec {
         ]
         .into_iter()
         .filter_map(|(name, changed)| changed.then_some(name))
-        .collect();
-        let (last, rest) = changed.split_last()?;
-        let names = match rest {
-            [] => last.to_string(),
-            rest => format!("{} and {last}", rest.join(", ")),
-        };
-        Some(format!(
-            "The Sandbox for {} was created before its {names} changed in the config; to \
-             apply them, {}.",
-            workspace.display(),
-            recreate_hint(workspace)
-        ))
+        .collect()
     }
+}
+
+/// The one line telling the user that the Sandbox for `workspace` was created before the
+/// `changed` settings changed in the config, or `None` if none did. boxq never rebuilds a
+/// Sandbox on its own, since that discards its state.
+pub fn mismatch_warning(workspace: &Path, changed: &[&str]) -> Option<String> {
+    let (last, rest) = changed.split_last()?;
+    let names = match rest {
+        [] => last.to_string(),
+        rest => format!("{} and {last}", rest.join(", ")),
+    };
+    Some(format!(
+        "The Sandbox for {} was created before its {names} changed in the config; to apply \
+         them, {}.",
+        workspace.display(),
+        recreate_hint(workspace)
+    ))
 }
 
 /// How to get the Sandbox for `workspace` created afresh, to take what it was created from.

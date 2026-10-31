@@ -1,5 +1,5 @@
 use boxq::config::{Resources, Size};
-use boxq::spec::Spec;
+use boxq::spec::{Spec, mismatch_warning};
 
 #[test]
 fn with_nothing_configured_a_sandbox_gets_the_interim_image_and_boxlites_defaults() {
@@ -74,7 +74,7 @@ fn interim() -> Spec {
 fn a_sandbox_created_as_configured_gets_no_warning() {
     let ws = std::path::Path::new("/home/me/project");
 
-    assert_eq!(interim().mismatch_warning(&interim(), ws), None);
+    assert_eq!(mismatch_warning(ws, &interim().changes(&interim())), None);
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn a_changed_config_warns_in_one_line_naming_the_changes_and_the_fix() {
         ..interim()
     };
 
-    let warning = config.mismatch_warning(&created, ws).unwrap();
+    let warning = mismatch_warning(ws, &config.changes(&created)).unwrap();
 
     assert_eq!(
         warning,
@@ -106,10 +106,31 @@ fn a_single_change_is_named_alone() {
         ..interim()
     };
 
-    let warning = config.mismatch_warning(&interim(), ws).unwrap();
+    let warning = mismatch_warning(ws, &config.changes(&interim())).unwrap();
 
     assert!(
         warning.starts_with("The Sandbox for /w was created before its cpus changed in"),
+        "{warning}"
+    );
+}
+
+/// The Setup Hooks that changed join the Spec's in the one line.
+#[test]
+fn changes_beyond_the_spec_are_named_in_the_same_line() {
+    let ws = std::path::Path::new("/w");
+    let config = Spec {
+        image: "alpine:3".into(),
+        ..interim()
+    };
+    let mut changed = config.changes(&interim());
+    changed.push("Workspace Setup Hook");
+
+    let warning = mismatch_warning(ws, &changed).unwrap();
+
+    assert!(
+        warning.starts_with(
+            "The Sandbox for /w was created before its image and Workspace Setup Hook changed in"
+        ),
         "{warning}"
     );
 }

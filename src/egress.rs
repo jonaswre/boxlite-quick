@@ -28,6 +28,11 @@ const BUILTINS: &[&str] = &[
     "files.pythonhosted.org",
     "crates.io",
     "*.crates.io",
+    // apt and rustup, so a Setup Hook can use them (jonaswre/boxlite-quick#30).
+    "deb.debian.org",
+    "security.debian.org",
+    "static.rust-lang.org",
+    "sh.rustup.rs",
 ];
 
 /// A Sandbox's `allow_net`. Never empty, since BoxLite reads an empty list as full access.

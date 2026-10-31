@@ -7,6 +7,7 @@ use crate::config::read_or_default;
 use crate::egress::Policy;
 use crate::reap::reap_box;
 use crate::runtime;
+use crate::setup::Setup;
 use crate::spec::Spec;
 use anyhow::Context;
 use boxlite::runtime::options::{
@@ -34,6 +35,9 @@ pub struct Up {
     /// record of which. A Box's secrets and env are fixed at creation, so it keeps those until it
     /// is removed and created afresh.
     pub auth_changed: bool,
+    /// How far the Sandbox's Setup Hooks got, or `None` if boxq has no record of them, which
+    /// counts as set up.
+    pub setup: Option<Setup>,
 }
 
 /// One Sandbox as `list` reports it.
@@ -67,6 +71,9 @@ struct Record {
     /// [`Auth::fingerprint`] of what the Sandbox was created with; `None` like `as_created`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auth: Option<String>,
+    /// `None` like `as_created`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    setup: Option<Setup>,
 }
 
 /// What a command needs to run in a Sandbox with no runtime open: the Box's own socket, and the
@@ -187,17 +194,26 @@ impl Sandboxes {
     ) -> anyhow::Result<Up> {
         let rt = runtime::open(&self.boxlite_home())?;
         // The runtime's lock keeps the Box from appearing or vanishing until it is created.
-        let (as_created, created_auth) = match rt.get_info(&ws.box_name()).await? {
-            Some(_) => self
-                .read_record(&ws.box_name())?
-                .map_or((None, None), |r| (r.as_created, r.auth)),
-            None => (Some(spec.clone()), Some(auth.fingerprint())),
+        let record = match rt.get_info(&ws.box_name()).await? {
+            Some(_) => self.read_record(&ws.box_name())?.unwrap_or(Record {
+                workspace: ws.path().into(),
+                as_created: None,
+                auth: None,
+                setup: None,
+            }),
+            None => Record {
+                workspace: ws.path().into(),
+                as_created: Some(spec.clone()),
+                auth: Some(auth.fingerprint()),
+                setup: Some(Setup::default()),
+            },
         };
-        let auth_changed = created_auth
+        let auth_changed = record
+            .auth
             .as_ref()
             .is_some_and(|created| *created != auth.fingerprint());
         // The record goes first, so a Box never exists without one.
-        self.write_record(ws, as_created.clone(), created_auth)?;
+        self.write_record(ws, &record)?;
         let mut options = BoxOptions {
             rootfs: RootfsSpec::Image(spec.image.clone()),
             cpus: spec.cpus,
@@ -243,9 +259,23 @@ impl Sandboxes {
                 socket: box_dir.join("sockets/box.sock"),
                 container_id: container_id(&box_dir)?,
             },
-            as_created,
+            as_created: record.as_created,
             auth_changed,
+            setup: record.setup,
         })
+    }
+
+    /// Records how far the Workspace's Setup Hooks got, keeping the rest of its record.
+    pub fn record_setup(&self, ws: &Workspace, setup: &Setup) -> anyhow::Result<()> {
+        let record = self.read_record(&ws.box_name())?;
+        let record = record.with_context(|| format!("{} has no Sandbox", ws.path().display()))?;
+        self.write_record(
+            ws,
+            &Record {
+                setup: Some(setup.clone()),
+                ..record
+            },
+        )
     }
 
     /// Stops the Workspace's Sandbox, keeping its state.
@@ -303,19 +333,9 @@ impl Sandboxes {
         self.home.join("sandboxes").join(format!("{box_name}.toml"))
     }
 
-    fn write_record(
-        &self,
-        ws: &Workspace,
-        as_created: Option<Spec>,
-        auth: Option<String>,
-    ) -> anyhow::Result<()> {
+    fn write_record(&self, ws: &Workspace, record: &Record) -> anyhow::Result<()> {
         let path = self.record_path(&ws.box_name());
-        let record = Record {
-            workspace: ws.path().into(),
-            as_created,
-            auth,
-        };
-        let toml = toml::to_string(&record)
+        let toml = toml::to_string(record)
             .with_context(|| format!("cannot record Workspace {}", ws.path().display()))?;
         let dir = path.parent().unwrap();
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
