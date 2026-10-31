@@ -7,10 +7,7 @@ use super::*;
 #[ignore = "boots a real Box; needs KVM"]
 async fn shell_opens_a_root_shell_in_the_workspace_and_leaves_the_sandbox_running() {
     let f = Fixture::new();
-    f.sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    f.up(IMAGE).await;
     let ws = f.workspace.path().to_str().unwrap();
 
     let mut t = Terminal::boxq(&f, &["shell", ws]);
@@ -29,10 +26,7 @@ async fn shell_opens_a_root_shell_in_the_workspace_and_leaves_the_sandbox_runnin
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_session_follows_its_terminals_size() {
     let f = Fixture::new();
-    f.sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    f.up(IMAGE).await;
     let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
     t.expect_prompt(&f.workspace);
     t.type_in("echo \"size:$(stty size)\"\r");
@@ -50,10 +44,7 @@ async fn a_session_follows_its_terminals_size() {
 #[ignore = "boots a real Box; needs KVM"]
 async fn ctrl_c_interrupts_the_guests_command_not_boxq() {
     let f = Fixture::new();
-    f.sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    f.up(IMAGE).await;
     let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
     t.expect_prompt(&f.workspace);
     t.type_in("sleep 600\r");
@@ -73,10 +64,7 @@ async fn ctrl_c_interrupts_the_guests_command_not_boxq() {
 #[ignore = "boots a real Box; needs KVM"]
 async fn a_hangup_sent_to_boxq_reaches_the_session() {
     let f = Fixture::new();
-    f.sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    f.up(IMAGE).await;
     let mut t = Terminal::boxq(&f, &["shell", f.workspace.path().to_str().unwrap()]);
     t.expect_prompt(&f.workspace);
     rustix::process::kill_process(

@@ -8,11 +8,7 @@ use boxlite::runtime::options::{BoxOptions, RootfsSpec};
 async fn the_guest_holds_only_the_placeholder_never_the_key() {
     let f = Fixture::new();
 
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
     let token = sh(&up.target, "printf %s \"$ANTHROPIC_AUTH_TOKEN\"")
         .await
         .unwrap();
@@ -84,11 +80,7 @@ async fn a_sandbox_without_a_record_of_its_auth_reports_no_change() {
         .unwrap();
     drop(rt);
 
-    let up = f
-        .sandboxes
-        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
-        .await
-        .unwrap();
+    let up = f.up(IMAGE).await;
 
     assert!(!up.created);
     assert!(!up.auth_changed);

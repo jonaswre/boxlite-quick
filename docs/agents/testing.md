@@ -10,7 +10,7 @@ scripts/real-box [libtest args]   # e.g. scripts/real-box egress:: auth::
 
 It builds the tests, then runs `cargo test --locked --test real_box -- --ignored [libtest args]` at the default thread count. The arguments are test filters such as `egress::`, or `--skip` and `--exact`. The build and the tests share one time limit of 540 s (`REAL_BOX_TIME_LIMIT` seconds). The output also goes to `target/real-box/<timestamp>.log`.
 
-The last line, starting `real-box:`, says what happened. The exit status is 0 if every test passed. It is non-zero if the build failed, a test failed or the time limit was hit (124). After the time limit, the script kills the VMs that stopped tests left running and removes their homes. A cold build can use up the time limit. If it does, run the script again: the build carries on from where it stopped.
+The last line, starting `real-box:`, says what happened. The exit status is 0 if every test passed. It is non-zero if the build failed, a test failed or the time limit was hit (124, or 137 if a test had to be killed). After the time limit, the script kills the VMs that stopped tests left running and removes their homes. A cold build can use up the time limit. If it does, run the script again: the build carries on from where it stopped.
 
 ## What to run
 

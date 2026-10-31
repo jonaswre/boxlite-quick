@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the real-Box tests within one command (jonaswre/boxlite-quick#42), as docs/agents/testing.md
-# says. Arguments go to libtest after `--ignored`: test filters such as `egress::`, `--skip`, `--exact`.
+# says. Arguments go to libtest after `--ignored`: test filters such as `egress::`, `--skip`,
+# `--exact`.
 #
 # The build and the tests share one time limit, REAL_BOX_TIME_LIMIT seconds (default 540), so the
 # command ends before an agent's 10-minute limit on one command. The output is saved to a log
@@ -51,7 +52,9 @@ step() {
     exit "$status"
   } 2>&1 | tee -a "$log"
   status=${PIPESTATUS[0]}
-  if ((status == 124 || status == 137)); then
+  # `timeout` exits 124, or 137 if it had to kill. A test killed by a signal, such as by the OOM
+  # killer, exits 137 too, so the limit is blamed only once it has passed.
+  if ((status == 124 || status == 137)) && ((SECONDS >= limit)); then
     echo "real-box: $what hit the time limit of $limit s; the output is in $log" >&2
     exit "$status"
   elif ((status != 0)); then
