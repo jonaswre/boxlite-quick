@@ -40,8 +40,11 @@ fn spec(image: &str) -> Spec {
     }
 }
 
-/// Node, for the tests that install Claude Code from npm.
-const NODE_IMAGE: &str = "node:22-bookworm";
+/// The image the Claude Code tests run in: boxq's Base Image, or `BOXQ_TEST_IMAGE`, which the
+/// image workflow sets to the build it is about to publish.
+fn claude_image() -> String {
+    std::env::var("BOXQ_TEST_IMAGE").unwrap_or_else(|_| boxq::spec::BASE_IMAGE.into())
+}
 
 /// A key no test sends anywhere real, distinctive enough to grep a guest for.
 const FAKE_KEY: &str = "boxq-fake-key-6f1c0e9a7b2d4e58";
@@ -688,10 +691,9 @@ async fn claude_code_authenticates_through_the_placeholder() {
 
     let up = f
         .sandboxes
-        .up(&f.workspace, &spec(NODE_IMAGE), &policy, &auth)
+        .up(&f.workspace, &spec(&claude_image()), &policy, &auth)
         .await
         .unwrap();
-    boxq::claude::ensure_installed(&up.target).await.unwrap();
     let asked = sh(
         &up.target,
         "claude -p 'Reply with the single word pong, in lower case.' 2>&1",
@@ -926,26 +928,21 @@ fn plain(screen: &str) -> String {
 async fn claude_code_starts_with_the_hosts_skills_and_mcp_servers_and_no_prompts() {
     let mut f = Fixture::new();
     let host = host_claude_config(&f.temp_dir(), &f.workspace);
-    // The image workflow sets this to the Base Image build it is about to publish.
-    let image = std::env::var("BOXQ_TEST_IMAGE").ok();
     let up = f
         .sandboxes
         .up(
             &f.workspace,
-            &spec(image.as_deref().unwrap_or(NODE_IMAGE)),
+            &spec(&claude_image()),
             &default_policy(),
             &f.auth,
         )
         .await
         .unwrap();
     // Prompts and their keys change between releases, so this test is what proves the seeded
-    // keys still skip them in the release boxq installs, or the one an image under test ships.
-    if image.is_some() {
-        let (version, code) = sh(&up.target, "claude --version").await.unwrap();
-        assert_eq!(code, 0, "the image has no working claude: {version}");
-    } else {
-        boxq::claude::ensure_installed(&up.target).await.unwrap();
-    }
+    // keys still skip them in the release the image ships.
+    boxq::claude::check_installed(&up.target, &f.workspace)
+        .await
+        .unwrap();
 
     host.sync(&f.workspace, &up.target).await.unwrap();
 
@@ -1049,7 +1046,12 @@ impl Terminal {
 
     /// Waits for `text` in the terminal's output, panicking with what it saw after 60 s.
     fn expect(&mut self, text: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        self.expect_within(text, std::time::Duration::from_secs(60));
+    }
+
+    /// Waits for `text` in the terminal's output, panicking with what it saw after `wait`.
+    fn expect_within(&mut self, text: &str, wait: std::time::Duration) {
+        let deadline = std::time::Instant::now() + wait;
         while !self.seen.contains(text) {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match self.output.recv_timeout(left) {
@@ -1218,27 +1220,44 @@ async fn run_starts_claude_in_the_workspace_and_shell_works_beside_it() {
     assert_eq!((shell_exit, run.exit_code()), (0, 4));
 }
 
-/// Pulls a large image and Claude Code from npm, so it is slow and needs the network.
+/// Pulls boxq's Base Image, so it is slow and needs the network.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "boots a real Box; needs KVM"]
-async fn claude_code_is_installed_once_in_a_sandbox_without_it() {
+#[ignore = "boots a real Box; needs KVM and internet access"]
+async fn run_on_a_fresh_workspace_starts_claude_code_from_the_pinned_base_image() {
     let f = Fixture::new();
+    let ws = f.workspace.path().to_str().unwrap();
+
+    let mut run = Terminal::boxq(&f, &["run", ws]);
+    run.resize(40, 160);
+    // The run pulls the Base Image into the fixture's empty home first.
+    run.expect_within("bypass permissions on", std::time::Duration::from_secs(600));
+    drop(run);
     let up = f
         .sandboxes
-        .up(&f.workspace, &spec(NODE_IMAGE), &default_policy(), &f.auth)
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
         .await
         .unwrap();
 
-    boxq::claude::ensure_installed(&up.target).await.unwrap();
-    // Without npm, only a Sandbox that skips the install still succeeds.
-    let removed = sh(&up.target, r#"rm "$(command -v npm)""#).await.unwrap();
-    let again = boxq::claude::ensure_installed(&up.target).await;
+    assert_eq!(up.as_created.unwrap().image, boxq::spec::BASE_IMAGE);
+}
 
-    assert_eq!(removed.1, 0, "{removed:?}");
-    assert!(again.is_ok(), "{again:?}");
-    let (version, code) = sh(&up.target, "claude --version").await.unwrap();
-    assert_eq!(code, 0, "claude --version printed {version:?}");
-    assert_eq!(version, "2.1.312 (Claude Code)\n");
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real Box; needs KVM"]
+async fn an_image_without_claude_code_is_refused_not_installed_into() {
+    let f = Fixture::new();
+    let up = f
+        .sandboxes
+        .up(&f.workspace, &spec(IMAGE), &default_policy(), &f.auth)
+        .await
+        .unwrap();
+
+    let checked = boxq::claude::check_installed(&up.target, &f.workspace).await;
+
+    let error = checked.unwrap_err().to_string();
+    assert!(
+        error.contains("no `claude`") && error.contains("boxq rm"),
+        "{error}"
+    );
 }
 
 fn hooks(global: Option<&str>, workspace: Option<&str>) -> SetupHooks {
