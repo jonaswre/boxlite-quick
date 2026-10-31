@@ -82,7 +82,7 @@ fn memory_beyond_what_boxlite_takes_is_an_error_naming_it() {
     assert!(err.to_string().contains("4294967296MiB"), "{err}");
 }
 
-fn defaulted() -> Spec {
+fn unconfigured() -> Spec {
     Spec::new(None, &Resources::default()).unwrap()
 }
 
@@ -91,7 +91,7 @@ fn a_sandbox_created_as_configured_gets_no_warning() {
     let ws = std::path::Path::new("/home/me/project");
 
     assert_eq!(
-        mismatch_warning(ws, &defaulted().changes(&defaulted())),
+        mismatch_warning(ws, &unconfigured().changes(&unconfigured())),
         None
     );
 }
@@ -99,12 +99,12 @@ fn a_sandbox_created_as_configured_gets_no_warning() {
 #[test]
 fn a_changed_config_warns_in_one_line_naming_the_changes_and_the_fix() {
     let ws = std::path::Path::new("/home/me/project");
-    let created = defaulted();
+    let created = unconfigured();
     let config = Spec {
         image: "alpine:3".into(),
         memory_mib: Some(2048),
         disk_gib: Some(20),
-        ..defaulted()
+        ..unconfigured()
     };
 
     let warning = mismatch_warning(ws, &config.changes(&created)).unwrap();
@@ -122,10 +122,10 @@ fn a_single_change_is_named_alone() {
     let ws = std::path::Path::new("/w");
     let config = Spec {
         cpus: Some(4),
-        ..defaulted()
+        ..unconfigured()
     };
 
-    let warning = mismatch_warning(ws, &config.changes(&defaulted())).unwrap();
+    let warning = mismatch_warning(ws, &config.changes(&unconfigured())).unwrap();
 
     assert!(
         warning.starts_with("The Sandbox for /w was created before its cpus changed in"),
@@ -139,9 +139,9 @@ fn changes_beyond_the_spec_are_named_in_the_same_line() {
     let ws = std::path::Path::new("/w");
     let config = Spec {
         image: "alpine:3".into(),
-        ..defaulted()
+        ..unconfigured()
     };
-    let mut changed = config.changes(&defaulted());
+    let mut changed = config.changes(&unconfigured());
     changed.push("Workspace Setup Hook");
 
     let warning = mismatch_warning(ws, &changed).unwrap();

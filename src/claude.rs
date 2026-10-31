@@ -9,21 +9,11 @@ use tokio_util::sync::CancellationToken;
 
 /// Fails, saying what to do, unless the Sandbox for `ws` has `claude` on its PATH.
 pub async fn check_installed(target: &ExecTarget, ws: &Workspace) -> anyhow::Result<()> {
-    if run_as_root(target, "command -v claude").await? == 0 {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "the Sandbox for {} has no `claude` on its PATH, as its image ships without Claude Code; \
-         to use an image with it, such as boxq's Base Image, {}",
-        ws.path().display(),
-        recreate_hint(ws.path())
-    )
-}
-
-/// Runs `sh -c script` as root, discarding its output, and returns its exit code.
-async fn run_as_root(target: &ExecTarget, script: &str) -> anyhow::Result<i32> {
     let token = CancellationToken::new();
-    let command = target.command("sh").args(["-c", script]).user("root");
+    let command = target
+        .command("sh")
+        .args(["-c", "command -v claude"])
+        .user("root");
     let mut exec = target
         .session()
         .execution()
@@ -31,6 +21,7 @@ async fn run_as_root(target: &ExecTarget, script: &str) -> anyhow::Result<i32> {
         .exec(command, token.clone())
         .await?;
     drop(exec.stdin_tx);
+    // Read only to let the command finish; what it prints doesn't matter.
     let mut output = OutputChunks::new(exec.stdout_rx, exec.stderr_rx);
     while output.next().await.is_some() {}
     let result = exec.result_rx.recv().await;
@@ -39,5 +30,13 @@ async fn run_as_root(target: &ExecTarget, script: &str) -> anyhow::Result<i32> {
     if let Some(message) = result.error_message {
         anyhow::bail!("the command did not end normally: {message}");
     }
-    Ok(result.exit_code)
+    if result.exit_code == 0 {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "the Sandbox for {} has no `claude` on its PATH, as its image ships without Claude Code; \
+         to use an image with it, such as boxq's Base Image, {}",
+        ws.path().display(),
+        recreate_hint(ws.path())
+    )
 }
