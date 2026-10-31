@@ -9,8 +9,14 @@ use std::path::Path;
 /// the map's fog.
 const INTERIM_IMAGE: &str = "node:22-bookworm";
 
-/// The image and resources to create a Sandbox with. A `None` resource leaves the choice to
-/// BoxLite's default.
+/// What a Sandbox gets for a resource no config sets (jonaswre/boxlite-quick#31). Filled in only
+/// when the Box is built, so changing one never makes an existing Sandbox look out of date.
+pub const DEFAULT_CPUS: u8 = 4;
+pub const DEFAULT_MEMORY_MIB: u32 = 8 * 1024;
+pub const DEFAULT_DISK_GIB: u64 = 32;
+
+/// The image and resources to create a Sandbox with, as configured. A `None` resource gets
+/// boxq's default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Spec {
     pub image: String,

@@ -8,7 +8,7 @@ use crate::egress::Policy;
 use crate::reap::reap_box;
 use crate::runtime;
 use crate::setup::Setup;
-use crate::spec::Spec;
+use crate::spec::{self, Spec};
 use anyhow::Context;
 use boxlite::runtime::options::{
     BoxOptions, NetworkMode, NetworkSpec, OutboundNetworkConfig, RootfsSpec, VolumeSpec,
@@ -220,9 +220,9 @@ impl Sandboxes {
         self.write_record(ws, &record)?;
         let mut options = BoxOptions {
             rootfs: RootfsSpec::Image(spec.image.clone()),
-            cpus: spec.cpus,
-            memory_mib: spec.memory_mib,
-            disk_size_gb: spec.disk_gib,
+            cpus: Some(spec.cpus.unwrap_or(spec::DEFAULT_CPUS)),
+            memory_mib: Some(spec.memory_mib.unwrap_or(spec::DEFAULT_MEMORY_MIB)),
+            disk_size_gb: Some(spec.disk_gib.unwrap_or(spec::DEFAULT_DISK_GIB)),
             entrypoint: Some(vec![]),
             cmd: Some(vec!["sleep".into(), "infinity".into()]),
             // Fixed once the Box exists, so a Sandbox keeps the binds it was created with.

@@ -502,6 +502,54 @@ fn zero_cpus_is_an_error() {
     assert!(err.contains("cpus"), "{err}");
 }
 
+/// The guest kernel takes at most 16, which BoxLite otherwise checks only at creation.
+#[test]
+fn cpus_beyond_16_are_an_error_naming_the_file() {
+    let host = Host::new();
+    let path = host.write_workspace("[resources]\ncpus = 17");
+
+    let err = format!("{:#}", host.load().unwrap_err());
+
+    assert!(err.contains(&*path.to_string_lossy()), "{err}");
+    assert!(err.contains("cpus"), "{err}");
+}
+
+#[test]
+fn up_to_16_cpus_are_taken() {
+    let host = Host::new();
+    host.write_global("[resources]\ncpus = 16");
+
+    assert_eq!(resources(&host.load().unwrap()).0, Some(16));
+}
+
+#[test]
+fn memory_beyond_the_hosts_ram_is_an_error_naming_the_file() {
+    let host = Host::new();
+    let path = host.write_workspace("[resources]\nmemory = \"1048576GiB\"");
+
+    let err = format!("{:#}", host.load().unwrap_err());
+
+    assert!(err.contains(&*path.to_string_lossy()), "{err}");
+    assert!(err.contains("memory"), "{err}");
+}
+
+#[test]
+fn memory_within_the_hosts_ram_is_taken() {
+    let host = Host::new();
+    host.write_global("[resources]\nmemory = \"512MiB\"");
+
+    assert_eq!(resources(&host.load().unwrap()).1, Some(512));
+}
+
+/// The disk is sparse, so it takes only the space the guest writes.
+#[test]
+fn disk_is_uncapped() {
+    let host = Host::new();
+    host.write_global("[resources]\ndisk = \"1048576GiB\"");
+
+    assert_eq!(resources(&host.load().unwrap()).2, Some(1 << 30));
+}
+
 #[test]
 fn an_invalid_base_url_is_an_error() {
     let mut host = Host::new();
