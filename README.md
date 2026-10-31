@@ -90,14 +90,14 @@ ProtectKernelTunables=no
 
 ## Building
 
-You need stable Rust and `protoc` 3.12 or later, which BoxLite's build uses:
+You need rustup, which installs the Rust release `rust-toolchain.toml` pins, and `protoc` 3.12 or later, which BoxLite's build uses:
 
 ```sh
 sudo apt install protobuf-compiler
 cargo build --release           # the binary is target/release/boxq
 ```
 
-`cargo test` runs the tests that need no KVM. The ones that boot a real Sandbox are ignored by default. Run them with `cargo test -- --ignored`, on a host with the prerequisites above, as CI's `real-box` job does.
+`cargo test` runs the tests that need no KVM. The ones that boot a real Sandbox are ignored by default. Run them with `cargo test -- --ignored`, on a host with the prerequisites above, as CI's `real-box` job does. CI's `test` job also fails on `cargo fmt --check` and `cargo clippy --all-targets --locked -- -D warnings`.
 
 ## Commands
 
